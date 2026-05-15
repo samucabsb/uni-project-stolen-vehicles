@@ -1,5 +1,7 @@
 # Sistema de Detecção de Placas de Veículos Roubados (Paralelismo em CPU)
 
+https://www.kaggle.com/datasets/barkataliarbab/license-plate-detection-dataset-10125-images?resource=download - 10125 IMAGENS EM ALTA RESOLUÇÃO DE CARROS PARA RECONHECIMENTO DE PLACAS.
+
 ## Descrição
 Este projeto implementa um sistema de detecção e reconhecimento de placas de veículos utilizando visão computacional, combinado com processamento paralelo em CPU.  
 A aplicação recebe imagens, detecta a placa do veículo, extrai o texto via OCR e compara com uma base interna de placas roubadas.
