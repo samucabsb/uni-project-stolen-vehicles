@@ -1,44 +1,83 @@
-# 🚗 Automatic License Plate Detection and Recognition (YOLO + EasyOCR)
+# Sistema de Detecção de Placas de Veículos Roubados (Paralelismo em CPU)
 
-Este projeto implementa um sistema simples de **detecção e reconhecimento de placas de veículos (ALPR)** usando:
+# Descrição
+# Este projeto implementa um sistema de detecção e reconhecimento de placas de veículos utilizando visão computacional,
+# combinado com processamento paralelo em CPU.
+# A aplicação recebe imagens, detecta a placa do veículo, extrai o texto via OCR e compara com uma base interna de placas roubadas.
 
-- 🔍 YOLOv8 para detecção
-- 🔤 EasyOCR para leitura de texto
-- 🖼️ OpenCV para processamento de imagem
+# Arquitetura do Sistema
+# Pipeline principal:
+# Imagem → Detecção (YOLO) → OCR → Normalização → Comparação → Resultado
 
----
+# Etapas do Processo
 
-## 📌 Funcionalidades
+# 1. Entrada de Dados
+# - Imagens carregadas de um diretório (/dataset)
+# - Lista de placas roubadas definida manualmente no sistema
 
-✅ Detecta veículos em imagens  
-✅ Recorta automaticamente a região da placa  
-✅ Extrai o texto da placa usando OCR  
-✅ Exibe o resultado com bounding box  
+# 2. Processamento da Imagem
+# Para cada imagem, o sistema executa:
 
----
+# 🔹 Detecção de Placa
+# Utiliza YOLO para localizar a placa na imagem
 
-## 🧠 Tecnologias Utilizadas
+# 🔹 Recorte
+# Extrai apenas a região da placa
 
-- Python 3.x  
-- Ultralytics YOLOv8  
-- EasyOCR  
-- OpenCV  
-- Matplotlib  
+# 🔹 OCR (Reconhecimento de Texto)
+# Converte a imagem da placa em texto
 
----
+# 🔹 Normalização
+# Padroniza o texto (remove símbolos, converte para maiúsculo, corrige inconsistências)
 
-## 📁 Dataset
+# 🔹 Comparação
+# Verifica se a placa está presente na base de placas roubadas
 
-Este projeto pode ser testado com o seguinte dataset:
+# 3. Saída
+# O sistema retorna:
+# Imagem X → ROUBADO
+# Imagem Y → OK
 
-👉 https://www.kaggle.com/datasets/krishnasrivaibhav/car-images-for-lisence-plate-identification
+# Paralelismo Implementado
+# O projeto utiliza paralelismo de dados (Data Parallelism)
 
----
+# Características:
+# - Cada imagem é processada de forma independente
+# - Distribuição entre múltiplos núcleos da CPU
+# - Implementado com multiprocessing em Python
 
-## ⚙️ Instalação
+# Exemplo de divisão:
+# CPU Core 1 → Imagem 1
+# CPU Core 2 → Imagem 2
+# CPU Core 3 → Imagem 3
 
-Clone o repositório:
+# Tecnologias Utilizadas
+# - Python
+# - YOLOv8 (Ultralytics)
+# - EasyOCR
+# - Multiprocessing
+# - SQLite (opcional)
 
-```bash
-git clone https://github.com/seu-usuario/seu-repositorio.git
-cd seu-repositorio
+# Execução Paralela (exemplo)
+# from multiprocessing import Pool
+# import os
+# with Pool(os.cpu_count()) as p:
+#     resultados = p.map(processar_imagem, lista_de_imagens)
+
+# Avaliação de Desempenho
+# O sistema pode ser avaliado através de:
+# - Tempo de execução sequencial vs paralelo
+# - Ganho de desempenho (speedup)
+# - Uso de CPU
+
+# Conceitos Envolvidos
+# - Paralelismo de dados
+# - Multiprocessing
+# - Visão computacional
+# - OCR
+# - Processamento concorrente
+
+# Considerações
+# - Projeto adaptado para execução em CPU (sem GPU)
+# - Uso de dataset controlado
+# - Foco no aprendizado de paralelismo
