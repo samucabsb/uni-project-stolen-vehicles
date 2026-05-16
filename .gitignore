@@ -1,0 +1,44 @@
+# ── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ── Virtual environments ─────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── IDEs ────────────────────────────────────────────────
+.vscode/
+.idea/
+
+# ── Sistema operacional ─────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs ────────────────────────────────────────────────
+*.log
+*.tmp
+
+# ── Outputs gerados ─────────────────────────────────────
+data/output/*
+!data/output/.gitkeep
+!data/output/crops/.gitkeep
+!data/output/preprocessed/.gitkeep
+
+# ── Entrada de dados (permitindo imagens pequenas) ──────
+# Ignora tudo, exceto imagens de teste
+data/input/*
+!data/input/*.jpg
+!data/input/*.jpeg
+!data/input/*.png
+!data/input/.gitkeep
+
+# ── Lista de placas roubadas (local) ────────────────────
+data/stolen_plates.txt
+
+# ── Modelos (mantém apenas o YOLO principal) ────────────
+models/*
+!models/license_plate_detector.pt
+!models/.gitkeep
