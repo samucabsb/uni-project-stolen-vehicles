@@ -1,18 +1,6 @@
 # Comparador Paralelo de Placas — v7
 
-Sistema de detecção e identificação automática de placas veiculares com
-comparação contra base de placas roubadas. Pipeline **YOLO** (detecção) +
-=======
-# Sistema de Detecção de Placas de Veículos Roubados (Paralelismo em CPU)
-
-https://www.kaggle.com/datasets/barkataliarbab/license-plate-detection-dataset-10125-images?resource=download - 10125 IMAGENS EM ALTA RESOLUÇÃO DE CARROS PARA RECONHECIMENTO DE PLACAS.
-
-Pipeline **YOLO** (detecção) +
->>>>>>> 200572cbffc2abbf6054fc406b4b899ca2251ddb
-**RapidOCR** (reconhecimento) + **ProcessPoolExecutor** (paralelismo), com
-relatório HTML interativo e análise comparativa serial vs paralelo.
-
----
+Dataset para baixar as imagens: https://www.kaggle.com/datasets/barkataliarbab/license-plate-detection-dataset-10125-images?resource=download 
 
 ## Sumário
 
