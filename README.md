@@ -2,6 +2,8 @@
 
 Dataset para baixar as imagens: https://www.kaggle.com/datasets/barkataliarbab/license-plate-detection-dataset-10125-images?resource=download 
 
+A performance já está muito boa, porém a precisão ainda pode melhorar na detecçaõ das placas.
+
 ## Sumário
 
 - [Instalação](#instalação)
