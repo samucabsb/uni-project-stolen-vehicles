@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Comparador Paralelo de Placas — v7
 
 Sistema de detecção e identificação automática de placas veiculares com
