@@ -1,6 +1,7 @@
 # Comparador Paralelo de Placas — v7
 
 Dataset para baixar as imagens: https://www.kaggle.com/datasets/barkataliarbab/license-plate-detection-dataset-10125-images?resource=download 
+Dataset para baixar as imagens: https://www.kaggle.com/datasets/fareselmenshawii/license-plate-dataset/data?select=images
 
 A performance já está muito boa, porém a precisão ainda pode melhorar na detecçaõ das placas.
 
