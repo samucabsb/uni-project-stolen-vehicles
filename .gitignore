@@ -1,44 +1,90 @@
-# ── Python ───────────────────────────────────────────────
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# ── Virtual environments ─────────────────────────────────
+# ── Virtual environments ──────────────────────────────────────────────────────
 .venv/
 venv/
 env/
+ENV/
+env.bak/
+venv.bak/
+.python-version
 
-# ── IDEs ────────────────────────────────────────────────
+# ── Testes e cobertura ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# ── IDEs e editores ───────────────────────────────────────────────────────────
 .vscode/
 .idea/
+*.swp
+*.swo
+*.swn
+*~
+.spyderproject
+.spyproject
+.ropeproject
 
-# ── Sistema operacional ─────────────────────────────────
+# ── Sistemas operacionais ─────────────────────────────────────────────────────
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
 desktop.ini
 
-# ── Logs ────────────────────────────────────────────────
+# ── Logs e temporários ────────────────────────────────────────────────────────
 *.log
 *.tmp
+*.bak
+*.swp
 
-# ── Outputs gerados ─────────────────────────────────────
-data/output/*
-!data/output/.gitkeep
+# ── Outputs gerados em runtime ────────────────────────────────────────────────
+# CSVs, relatórios e imagens processadas são regenerados a cada execução.
+# Apenas os .gitkeep permanecem para manter a estrutura de pastas.
+data/output/*.csv
+data/output/*.html
+data/output/crops/*
+data/output/preprocessed/*
 !data/output/crops/.gitkeep
 !data/output/preprocessed/.gitkeep
 
-# ── Entrada de dados (permitindo imagens pequenas) ──────
-# Ignora tudo, exceto imagens de teste
-data/input/*
-!data/input/*.jpg
-!data/input/*.jpeg
-!data/input/*.png
-!data/input/.gitkeep
-
-# ── Lista de placas roubadas (local) ────────────────────
+# ── Lista de placas roubadas (gerenciada localmente) ──────────────────────────
+# Cada usuário/máquina pode ter sua própria lista de testes.
+# Use `python tools/stolen.py` para gerenciar.
 data/stolen_plates.txt
 
-# ── Modelos (mantém apenas o YOLO principal) ────────────
-models/*
-!models/license_plate_detector.pt
-!models/.gitkeep
+# ── O que FICA versionado (lembrete) ──────────────────────────────────────────
+# - Todo código em src/, tools/, main.py
+# - requirements.txt, README.md
+# - models/license_plate_detector.pt  (modelo YOLO, ~6MB)
+# - data/input/*.jpg                  (suas imagens de teste)

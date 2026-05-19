@@ -1,9 +1,11 @@
 # Comparador Paralelo de Placas — v7
 
-Dataset para baixar as imagens: https://www.kaggle.com/datasets/barkataliarbab/license-plate-detection-dataset-10125-images?resource=download 
-Dataset para baixar as imagens: https://www.kaggle.com/datasets/fareselmenshawii/license-plate-dataset/data?select=images
+Sistema de detecção e identificação automática de placas veiculares com
+comparação contra base de placas roubadas. Pipeline **YOLO** (detecção) +
+**RapidOCR** (reconhecimento) + **ProcessPoolExecutor** (paralelismo), com
+relatório HTML interativo e análise comparativa serial vs paralelo.
 
-A performance já está muito boa, porém a precisão ainda pode melhorar na detecçaõ das placas.
+---
 
 ## Sumário
 
@@ -38,19 +40,34 @@ entrada em `data/input/`.
 python main.py
 ```
 
-O sistema pergunta o modo de execução (serial/parallel) e a quantidade de
-workers.
+O sistema pergunta o modo de execução (serial/parallel/pipeline) e a quantidade de workers.
 
 ### Modo direto (sem perguntas)
 
 ```powershell
-# Serial (baseline)
+# Baseline
 python main.py --execution serial --no-interactive
 
-# Paralelo
+# Data parallelism clássico
 python main.py --execution parallel --workers 4 --no-interactive
-python main.py --execution parallel --workers 8 --no-interactive
+
+# Pipeline two-stage (v8) — mais rápido em qualquer hardware
+python main.py --execution pipeline --workers 4 --no-interactive
 ```
+
+### Três modos disponíveis
+
+| Modo | Como funciona | Melhor em |
+|---|---|---|
+| `serial` | 1 processo, YOLO → OCR sequencial | Baseline |
+| `parallel` | N workers, cada um com YOLO+OCR | Hardware lento |
+| `pipeline` | YOLO em batch no main + N workers só OCR | **Qualquer hardware** |
+
+**Por que o `pipeline` é mais rápido:**
+- YOLO roda em batch (8 imgs por forward pass) no processo principal, sem concorrência
+- Workers carregam só OCR (~220MB) vs YOLO+OCR (~400MB)
+- Menor footprint por worker → menos cache miss → OCR mais rápido
+- Imagens sem placa saem imediatamente (sem custo de OCR)
 
 ---
 

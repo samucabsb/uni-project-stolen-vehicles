@@ -29,7 +29,10 @@ _NON_ALNUM = re.compile(r"[^A-Z0-9]")
 def warmup_ocr() -> None:
     """Faz warm-up do RapidOCR (carrega modelos ONNX)."""
     from rapidocr_onnxruntime import RapidOCR
-    engine = RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
+    try:
+        engine = RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
+    except TypeError:
+        engine = RapidOCR()
     dummy = np.zeros((32, 128, 3), dtype=np.uint8)
     engine(dummy)
     print("[WARMUP] RapidOCR pronto.")
