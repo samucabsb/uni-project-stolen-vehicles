@@ -1,11 +1,4 @@
-# Comparador Paralelo de Placas — v7
-
-Sistema de detecção e identificação automática de placas veiculares com
-comparação contra base de placas roubadas. Pipeline **YOLO** (detecção) +
-**RapidOCR** (reconhecimento) + **ProcessPoolExecutor** (paralelismo), com
-relatório HTML interativo e análise comparativa serial vs paralelo.
-
----
+# Comparador Paralelo de Placas — v8
 
 ## Sumário
 
