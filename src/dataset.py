@@ -8,6 +8,7 @@ from src.config import (
     INPUT_DIR, OUTPUT_DIR, CROPS_DIR, PREPROCESSED_DIR, MODELS_DIR,
     IMAGE_EXTENSIONS,
 )
+from src.logger import get_logger
 
 
 def ensure_directories() -> None:
@@ -35,11 +36,13 @@ def load_stolen_plates(filepath: Path) -> set:
 
     Cria o arquivo vazio se não existir.
     """
+    log = get_logger()
+
     if not filepath.exists():
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.touch()
-        print(f"[INFO] Arquivo de placas roubadas criado vazio: {filepath}")
-        print("[INFO] Use 'python tools/stolen.py add PLACA' para adicionar placas.")
+        log.info("[INFO] Arquivo de placas roubadas criado vazio: %s", filepath)
+        log.info("[INFO] Use 'python tools/stolen.py add PLACA' para adicionar placas.")
         return set()
 
     plates: set = set()
@@ -50,9 +53,9 @@ def load_stolen_plates(filepath: Path) -> set:
                 plates.add(plate)
 
     if plates:
-        print(f"[INFO] {len(plates)} placa(s) roubada(s) carregada(s).")
+        log.info("[INFO] %d placa(s) roubada(s) carregada(s).", len(plates))
     else:
-        print("[INFO] Lista de placas roubadas vazia.")
-        print("[INFO] Use 'python tools/stolen.py demo 5' para gerar um cenário de teste.")
+        log.info("[INFO] Lista de placas roubadas vazia.")
+        log.info("[INFO] Use 'python tools/stolen.py demo 5' para gerar um cenário de teste.")
 
     return plates

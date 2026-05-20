@@ -7,6 +7,11 @@ Todos os caminhos, constantes e parâmetros ajustáveis ficam aqui.
 from pathlib import Path
 
 
+# ── Versão ────────────────────────────────────────────────────────────────────
+
+VERSION = "9.0"
+
+
 # ── Diretórios principais ─────────────────────────────────────────────────────
 
 BASE_DIR         = Path(__file__).resolve().parent.parent
@@ -39,13 +44,26 @@ BBOX_PADDING_RATIO = 0.08
 
 # ── Parâmetros do OCR ─────────────────────────────────────────────────────────
 
-# Score mínimo para considerar uma leitura "confiável o suficiente" e pular
-# as variantes restantes (otimização early exit).
-OCR_EARLY_EXIT_SCORE = 10.0
+# Score mínimo para considerar uma leitura boa o suficiente e pular as
+# variantes restantes (early exit). Reduzido de 10.0 → 7.5:
+#   Score 7.5 = letras+dígitos (+4) + tamanho certo (+2) + conf ≥ 0.5 (+1.5)
+#   É uma leitura confiável sem exigir quase-perfeição.
+OCR_EARLY_EXIT_SCORE = 7.5
 
 # Altura mínima de uma variante de crop para considerá-la viável para OCR.
-# Variantes muito pequenas geram leituras erradas e gastam tempo.
 OCR_MIN_VARIANT_HEIGHT = 10
+
+# Largura máxima do crop antes de enviar ao OCR (px).
+# Crops mais largos são redimensionados via INTER_AREA antes da inferência.
+# O RapidOCR processa imagens largas mais devagar sem ganho de precisão
+# para texto estruturado como placas.
+OCR_MAX_CROP_WIDTH = 320
+
+# Score mínimo na variante 1 para não pular a variante 2.
+# Se variante 1 retornar score abaixo deste valor (quase sem texto detectado),
+# pula direto para variante 3 (metade inferior), que tende a ser mais útil
+# para placas de duas linhas do que a variante 2 (sem topo decorativo).
+OCR_SKIP_VARIANT2_SCORE = 2.0
 
 
 # ── Status possíveis ──────────────────────────────────────────────────────────
@@ -58,8 +76,7 @@ STATUS_ERROR           = "ERRO"
 
 # ── Blacklist de palavras que nunca são parte de uma placa ────────────────────
 # Nomes de estado/cidade/marca/slogans que o OCR pode capturar de letreiros
-# no entorno (ex: "WASHINGTON" do fundo da imagem). Genérico para múltiplos
-# países — adicionar conforme novos falsos positivos forem aparecendo.
+# no entorno. Genérico para múltiplos países.
 
 WORD_BLACKLIST = {
     # EUA / América do Norte

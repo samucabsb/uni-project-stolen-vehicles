@@ -1,15 +1,23 @@
 """
-Comparador Paralelo de Placas — v8.0
+Comparador Paralelo de Placas — v9.0
 =====================================
 
-Três modos de execução:
-  serial    Baseline sequencial.
-  parallel  Data parallelism (ProcessPoolExecutor). Bom em hardware lento.
-  pipeline  Two-stage pipeline (v8). YOLO em batch no processo principal +
-            N workers fazem só OCR. Speedup real em qualquer hardware.
+Pipeline YOLO (detecção) + RapidOCR (reconhecimento) com comparação contra
+lista de placas roubadas. Dois modos de execução:
+
+  serial    1 thread, YOLO → OCR sequencial. Baseline para medição.
+
+  parallel  Two-stage com threading:
+              Estágio 1: YOLO em batch no processo principal
+              Estágio 2: N threads executam OCR em paralelo
+            Threads compartilham memória do processo, mantendo os pesos do
+            modelo aquecidos no cache L3 do CPU. ONNX Runtime libera o GIL
+            durante inferência, então o paralelismo é real.
 """
 
-# Configura env vars ANTES de qualquer import pesado.
+# ⚠️  Limites de thread DEVEM ser configurados antes de qualquer import de
+# torch/cv2/onnx/ultralytics — senão cada lib spawn ~8 threads e gera
+# contention massiva entre as nossas N threads de OCR.
 from src.runtime import force_single_thread_env
 force_single_thread_env()
 
@@ -20,30 +28,46 @@ from pathlib import Path
 
 from src.colors import enable_ansi_colors, C, paint
 from src.config import (
-    INPUT_DIR, OUTPUT_DIR, STOLEN_PLATES_FILE, DEFAULT_YOLO_MODEL,
+    INPUT_DIR, OUTPUT_DIR, STOLEN_PLATES_FILE, DEFAULT_YOLO_MODEL, VERSION,
 )
 from src.dataset import ensure_directories, list_images, load_stolen_plates
 from src.detector import warmup_yolo
 from src.ocr import warmup_ocr
-from src.executor import run_tasks, print_hardware_info, get_hardware_info
+from src.executor import (
+    run_tasks, print_hardware_info, get_hardware_info,
+    recommend_workers, print_worker_diagnostics,
+)
 from src.report import save_results_csv, save_performance_log, print_summary
 from src.html_report import generate_html_report
+from src.logger import setup_logger, get_logger
 
-VALID_EXECUTIONS = ["serial", "parallel", "pipeline"]
 
+VALID_EXECUTIONS = ["serial", "parallel"]
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Comparador Paralelo de Placas v8.0"
+        description=f"Comparador Paralelo de Placas v{VERSION}"
     )
-    parser.add_argument("--execution", choices=VALID_EXECUTIONS)
-    parser.add_argument("--workers",  type=int)
-    parser.add_argument("--yolo-model", default=str(DEFAULT_YOLO_MODEL))
-    parser.add_argument("--no-interactive", action="store_true")
+    parser.add_argument("--execution", choices=VALID_EXECUTIONS,
+                        help="Modo de execução")
+    parser.add_argument("--workers", type=int,
+                        help="Quantidade de threads para o estágio OCR")
+    parser.add_argument("--yolo-model", default=str(DEFAULT_YOLO_MODEL),
+                        help="Caminho do modelo YOLO (.pt)")
+    parser.add_argument("--no-interactive", action="store_true",
+                        help="Roda sem perguntas, usando defaults ou flags")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Output de diagnóstico detalhado (nível DEBUG)")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Suprime mensagens INFO; mantém apenas WARNING+")
     return parser.parse_args()
 
 
 def _ask_choice(question: str, valid: list, default: str) -> str:
+    """Pergunta uma escolha entre opções válidas (case-insensitive)."""
     opts = "/".join(valid)
     while True:
         answer = input(f"{question} ({opts}) [padrão: {default}]: ").strip().lower()
@@ -54,11 +78,21 @@ def _ask_choice(question: str, valid: list, default: str) -> str:
         print(paint(f"  Opção inválida. Use: {opts}", C.YELLOW))
 
 
-def _ask_workers(default: int) -> int:
+def _ask_workers(hw: dict) -> int:
+    """
+    Pergunta o número de threads com recomendação baseada em hardware.
+
+    A2: exibe o valor recomendado calculado, mas aceita QUALQUER inteiro >= 1.
+    O usuário pode informar 12 (ou mais) para coletar dados de benchmark,
+    mesmo que o hardware tenha menos núcleos físicos.
+    """
+    recommended = recommend_workers(hw)
     while True:
-        answer = input(f"Quantidade de workers [padrão: {default}]: ").strip()
+        answer = input(
+            f"Quantidade de threads [recomendado: {recommended}, qualquer valor aceito]: "
+        ).strip()
         if not answer:
-            return default
+            return recommended
         try:
             v = int(answer)
             if v >= 1:
@@ -68,14 +102,47 @@ def _ask_workers(default: int) -> int:
         print(paint("  Digite um inteiro >= 1", C.YELLOW))
 
 
+def _check_ram_warning(hw: dict, workers: int) -> None:
+    """
+    A3: emite aviso se a RAM disponível pode ser insuficiente para o número
+    de workers solicitado. Não bloqueia — apenas informa.
+    ~400 MB por instância RapidOCR é uma estimativa conservadora.
+    """
+    log         = get_logger()
+    avail       = hw["ram_avail_gb"]
+    ram_needed  = workers * 0.4
+
+    if avail < 1.0:
+        log.warning(paint(
+            f"[AVISO] RAM disponível baixa ({avail:.1f} GB). "
+            f"Considere usar modo serial para evitar instabilidade.",
+            C.YELLOW
+        ))
+    elif avail < ram_needed:
+        log.warning(paint(
+            f"[AVISO] {workers} threads podem precisar de ~{ram_needed:.1f} GB de RAM, "
+            f"mas apenas {avail:.1f} GB disponível.",
+            C.YELLOW
+        ))
+
+
 def resolve_execution(args: argparse.Namespace) -> tuple:
+    """
+    Determina o modo e número de workers a partir dos args ou input interativo.
+
+    B4: print_worker_diagnostics é chamado aqui (seção de CONFIGURAÇÃO),
+    não dentro do pipeline de execução, para não intercalar com progresso.
+    """
     hw = get_hardware_info()
-    physical = hw["physical_cores"]
 
     if args.no_interactive:
         execution = args.execution or "serial"
-        workers   = args.workers or physical
-        return execution, workers if execution != "serial" else 1
+        if execution == "serial":
+            return "serial", 1
+        workers = args.workers or recommend_workers(hw)
+        _check_ram_warning(hw, workers)
+        print_worker_diagnostics(workers)
+        return "parallel", workers
 
     print(paint("\n===== CONFIGURAÇÃO =====", C.CYAN_BOLD))
     execution = args.execution or _ask_choice(
@@ -84,36 +151,45 @@ def resolve_execution(args: argparse.Namespace) -> tuple:
     if execution == "serial":
         return "serial", 1
 
-    workers = args.workers or _ask_workers(physical)
+    workers = args.workers or _ask_workers(hw)
+    _check_ram_warning(hw, workers)
+    print_worker_diagnostics(workers)
     return execution, workers
 
 
+# ── Warmup ────────────────────────────────────────────────────────────────────
+
 def run_warmup(execution: str, yolo_model: str) -> float:
+    """Carrega modelos para warm-up. Retorna o tempo gasto."""
+    log = get_logger()
     print(paint("\n===== WARM-UP =====", C.CYAN_BOLD))
     t0 = time.perf_counter()
 
     if execution == "serial":
         warmup_yolo(yolo_model)
         warmup_ocr()
-    elif execution == "parallel":
+    else:
+        # No modo parallel, apenas valida que o YOLO carrega.
+        # As instâncias OCR de cada thread são criadas sob demanda.
         from ultralytics import YOLO
         YOLO(yolo_model)
-        print("[VALIDAÇÃO] YOLO OK. OCR será carregado em cada worker.")
-    else:  # pipeline
-        from ultralytics import YOLO
-        YOLO(yolo_model)
-        print("[VALIDAÇÃO] YOLO OK. Estágio 1 (YOLO batch) rodará no processo principal.")
-        print("            Estágio 2 (OCR) rodará em workers dedicados.")
+        log.info("[VALIDAÇÃO] YOLO OK. OCR será carregado pela primeira thread.")
 
     elapsed = time.perf_counter() - t0
     print(f"  Concluído em {elapsed:.4f}s")
     return elapsed
 
 
+# ── Fluxo principal ───────────────────────────────────────────────────────────
+
 def main() -> int:
     enable_ansi_colors()
     args = parse_args()
 
+    # A4: configura logging antes de qualquer módulo usar get_logger()
+    setup_logger(verbose=args.verbose, quiet=args.quiet)
+
+    print(paint(f"\n  Comparador de Placas v{VERSION}", C.CYAN_BOLD))
     print_hardware_info()
 
     execution, workers = resolve_execution(args)
@@ -123,7 +199,7 @@ def main() -> int:
 
     if not Path(yolo_model).exists():
         print(paint(f"\n[ERRO] Modelo YOLO não encontrado: {yolo_model}", C.RED_BOLD))
-        print("  Coloque o arquivo em models/license_plate_detector.pt")
+        print("  Coloque o .pt em models/license_plate_detector.pt")
         return 1
 
     images = list_images(INPUT_DIR)
@@ -140,25 +216,17 @@ def main() -> int:
     stolen_plates = load_stolen_plates(STOLEN_PLATES_FILE)
 
     tasks = [
-        {"image_path": str(p), "stolen_plates": stolen_plates,
-         "yolo_model": yolo_model}
+        {"image_path": str(p), "stolen_plates": stolen_plates}
         for p in images
     ]
 
-    # Descrição do modo para exibição
-    mode_desc = {
-        "serial":   "SERIAL (1 worker, sequencial)",
-        "parallel": "PARALLEL (data parallelism, YOLO+OCR por worker)",
-        "pipeline": "PIPELINE (YOLO batch → N workers só OCR)",
-    }
-
+    mode_label = "SERIAL" if execution == "serial" else f"PARALLEL · {workers} threads"
     print(paint("\n===== EXECUTANDO =====", C.CYAN_BOLD))
-    print(f"  Execução  : {mode_desc[execution]}")
-    print(f"  Workers   : {workers}")
+    print(f"  Modo      : {paint(mode_label, C.CYAN_BOLD)}")
     print(f"  Imagens   : {len(images)}")
     print(f"  Modelo    : {yolo_model}\n")
 
-    results, elapsed, workers_req, workers_eff = run_tasks(
+    results, elapsed, w_req, w_eff, yolo_time, ocr_time = run_tasks(
         tasks, yolo_model, execution=execution, workers=workers
     )
 
@@ -166,17 +234,25 @@ def main() -> int:
     performance_file = OUTPUT_DIR / "performance_log.csv"
     html_report_file = OUTPUT_DIR / "report.html"
 
+    print()
     save_results_csv(results, results_file)
-    save_performance_log(performance_file, results, elapsed,
-                         execution, workers_req, workers_eff, warmup_time)
-    print_summary(results, elapsed, execution, workers_req, workers_eff,
-                  warmup_time, results_file, performance_file)
+    save_performance_log(
+        performance_file, results, elapsed, execution, w_req, w_eff,
+        warmup_time, yolo_time=yolo_time, ocr_time=ocr_time,
+    )
 
-    generate_html_report(results, elapsed, execution,
-                         workers_req, workers_eff, warmup_time,
-                         html_report_file)
+    print_summary(
+        results, elapsed, execution, w_req, w_eff, warmup_time,
+        results_file, performance_file,
+        yolo_time=yolo_time, ocr_time=ocr_time,
+    )
+
+    generate_html_report(
+        results, elapsed, execution, w_req, w_eff, warmup_time,
+        html_report_file,
+    )
     print(paint(f"\n[HTML] Relatório: {html_report_file}", C.CYAN_BOLD))
-    print(paint("       Abra no navegador.", C.GRAY))
+    print(paint("       Abra no navegador para visualizar.", C.GRAY))
     return 0
 
 

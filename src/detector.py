@@ -6,6 +6,7 @@ import numpy as np
 import cv2
 
 from src.config import BBOX_PADDING_RATIO
+from src.logger import get_logger
 
 
 def warmup_yolo(model_path: str) -> None:
@@ -14,7 +15,7 @@ def warmup_yolo(model_path: str) -> None:
     model = YOLO(model_path)
     dummy = np.zeros((64, 64, 3), dtype=np.uint8)
     model(dummy, verbose=False)
-    print("[WARMUP] YOLO pronto.")
+    get_logger().info("[WARMUP] YOLO pronto.")
 
 
 def _expand_bbox(x1: int, y1: int, x2: int, y2: int,
@@ -39,10 +40,10 @@ def _expand_bbox(x1: int, y1: int, x2: int, y2: int,
 
 def extract_best_crop(img: np.ndarray, detections) -> np.ndarray:
     """
-    Extrai o recorte da melhor detecção YOLO, com padding para garantir que
-    o texto completo da placa entre no recorte.
+    Extrai o recorte da melhor detecção YOLO (maior confiança), com padding.
 
     Retorna None se nenhuma placa for detectada.
+    Limitação conhecida: considera apenas uma placa por imagem.
     """
     h, w = img.shape[:2]
     best_crop = None
@@ -62,7 +63,6 @@ def extract_best_crop(img: np.ndarray, detections) -> np.ndarray:
             if x2 <= x1 or y2 <= y1:
                 continue
 
-            # Aplica padding ANTES do crop
             x1, y1, x2, y2 = _expand_bbox(x1, y1, x2, y2, w, h, BBOX_PADDING_RATIO)
 
             crop = img[y1:y2, x1:x2]

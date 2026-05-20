@@ -5,12 +5,16 @@ CONTEXTO:
   PyTorch, ONNX Runtime e OpenCV criam pools internos de threads. Por padrão,
   cada um tenta usar todas as cores da CPU.
 
-  Com N workers (processos), cada um spawnando T threads, temos N*T threads
-  brigando pelos mesmos N núcleos. Resultado: contenção massiva e slowdown
-  (chegou a ser 2x mais lento que serial nos testes).
+  Com N workers (threads) de OCR, cada biblioteca spawnando T threads internas,
+  temos N*T threads brigando pelos mesmos núcleos. Resultado: contenção massiva
+  e slowdown (chegou a ser 2x mais lento que serial nos testes).
 
-  Solução: cada processo worker usa 1 thread interna. O paralelismo vem da
-  quantidade de processos, não de threads internas de cada um.
+  Solução: forçar 1 thread interna por biblioteca. O paralelismo vem das N
+  threads de OCR, não de sub-threads de cada biblioteca.
+
+  Nota sobre ONNX Runtime: não é limitado via API aqui. O ONNX é limitado
+  via intra_op_num_threads=1 passado ao construtor do RapidOCR em pipeline.py
+  (_make_ocr_engine). torch e cv2 são limitados via API neste módulo.
 """
 
 import os
@@ -35,20 +39,25 @@ def force_single_thread_env() -> None:
 
     IMPORTANTE: Deve ser chamada ANTES de qualquer `import torch`, `import cv2`,
     `import onnxruntime` ou `import ultralytics`. Caso contrário, as libs já
-    terão lido os valores padrão.
+    terão lido os valores padrão e ignorarão as variáveis.
     """
     for var in _THREAD_ENV_VARS:
         os.environ[var] = "1"
 
-    # Silencia logs verbosos do Ultralytics (não tem haver com threading mas
-    # é o lugar natural pra setar antes do import)
+    # Silencia logs verbosos do Ultralytics
     os.environ["YOLO_VERBOSE"] = "False"
 
 
 def apply_library_thread_limits() -> None:
     """
-    Limita threads diretamente via APIs das bibliotecas.
-    Chamar DEPOIS que as libs foram importadas, complementa o force_single_thread_env.
+    Limita threads diretamente via APIs de torch e cv2.
+
+    Deve ser chamada DEPOIS que as libs foram importadas, complementando
+    force_single_thread_env para as libs que ignoram variáveis de ambiente
+    após já terem sido carregadas.
+
+    ONNX Runtime é tratado separadamente via intra_op_num_threads=1 no
+    construtor do RapidOCR (pipeline.py::_make_ocr_engine).
     """
     try:
         import torch
@@ -57,7 +66,7 @@ def apply_library_thread_limits() -> None:
             torch.set_num_interop_threads(1)
         except RuntimeError:
             # set_num_interop_threads só pode ser chamado uma vez por processo.
-            # Se já foi chamado, ignora silenciosamente.
+            # Se já foi chamado (ex: em warmup), ignora silenciosamente.
             pass
     except ImportError:
         pass

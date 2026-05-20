@@ -19,8 +19,16 @@ from datetime import datetime
 from pathlib import Path
 
 from src.config import (
-    STATUS_OK, STATUS_STOLEN, STATUS_UNIDENTIFIED, STATUS_ERROR,
+    STATUS_OK, STATUS_STOLEN, STATUS_UNIDENTIFIED, STATUS_ERROR, VERSION,
 )
+
+
+# ── Descrições dos modos ──────────────────────────────────────────────────────
+
+_MODE_DESCRIPTIONS = {
+    "serial":   "1 thread, YOLO e OCR em sequência (baseline para benchmark).",
+    "parallel": "Two-stage: YOLO em batch no processo principal, depois OCR em N threads paralelas.",
+}
 
 
 # ── CSS embutido ──────────────────────────────────────────────────────────────
@@ -582,7 +590,7 @@ function renderTable() {
         <span class="num">${conf}%</span>
       </td>
       <td><span class="num">${(r.total_time_s || 0).toFixed(3)}s</span></td>
-      <td><span class="num">${r.worker_pid || '—'}</span></td>
+      <td><span class="num">${r.worker_id || '—'}</span></td>
     `;
     tr.addEventListener('click', () => openModal(parseInt(tr.dataset.idx)));
     tbody.appendChild(tr);
@@ -628,8 +636,8 @@ function openModal(idx) {
       <div class="modal-meta-value">${(r.ocr_time_s || 0).toFixed(3)}s</div>
     </div>
     <div class="modal-meta-item">
-      <div class="modal-meta-label">Worker PID</div>
-      <div class="modal-meta-value">${r.worker_pid || '—'}</div>
+      <div class="modal-meta-label">Worker ID</div>
+      <div class="modal-meta-value">${r.worker_id || '—'}</div>
     </div>
   `;
 
@@ -771,6 +779,9 @@ def _build_html(
                    if workers_requested == workers_effective
                    else f"{workers_effective} (solicitado: {workers_requested})")
 
+    version = VERSION
+    mode_description = _MODE_DESCRIPTIONS.get(execution, "")
+
     # Resultados como JSON para o JS renderizar
     # default=str para serializar Path, etc; ensure_ascii=False para acentos
     results_json = json.dumps(enriched, ensure_ascii=False, default=str)
@@ -780,7 +791,7 @@ def _build_html(
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Relatório · Comparador de Placas v7</title>
+<title>Relatório · Comparador de Placas v{version}</title>
 <style>{_CSS}</style>
 </head>
 <body>
@@ -789,13 +800,16 @@ def _build_html(
 <header class="hero">
   <h1 class="hero-title">
     <span>Comparador de Placas</span>
-    <span class="hero-badge">v7</span>
+    <span class="hero-badge">v{version}</span>
   </h1>
   <div class="hero-meta">
     Executado em <strong>{timestamp}</strong> ·
     Modo <strong>{execution.upper()}</strong> ·
-    <strong>{workers_str}</strong> worker(s) ·
+    <strong>{workers_str}</strong> thread(s) ·
     Warm-up <strong>{warmup_time:.2f}s</strong>
+  </div>
+  <div class="hero-meta" style="font-size:12px;color:var(--text-faint);margin-top:4px;">
+    {mode_description}
   </div>
   {_build_stats_cards(results, elapsed, throughput, workers_effective)}
 </header>
@@ -825,7 +839,7 @@ def _build_html(
           <th>Status</th>
           <th>Confiança</th>
           <th>Tempo</th>
-          <th>PID</th>
+          <th>Worker ID</th>
         </tr>
       </thead>
       <tbody id="results-body"></tbody>
@@ -834,7 +848,7 @@ def _build_html(
 </section>
 
 <div class="footer">
-  Relatório gerado automaticamente pelo Comparador de Placas v7 · {timestamp}<br>
+  Relatório gerado automaticamente pelo Comparador de Placas v{version} · {timestamp}<br>
   Clique em qualquer linha para ver detalhes
 </div>
 
