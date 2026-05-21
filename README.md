@@ -3,6 +3,8 @@
 Pipeline YOLO (detecção) + fast-plate-ocr/CCT (reconhecimento) com comparação
 contra lista de placas roubadas.
 
+https://embarcados.com.br/modelo-para-identificacao-dos-caracteres-da-placa/ 
+
 ---
 
 ## O que mudou na v10
