@@ -1,8 +1,8 @@
 """
-runtime.py — Configuração de threading para evitar contenção entre processos.
+runtime.py — Configuração de threading e SSL para evitar problemas de ambiente.
 
-CONTEXTO
-========
+THREADING
+=========
 PyTorch, ONNX Runtime e OpenCV criam pools internos de threads. Por padrão,
 cada um tenta usar todos os núcleos da CPU.
 
@@ -10,25 +10,54 @@ Com N workers (threads) de OCR, cada biblioteca spawnando T threads internas,
 temos N×T threads brigando pelos mesmos núcleos. Isso gera contenção massiva
 e pode tornar o sistema mais lento que a execução serial.
 
-SOLUÇÃO
-=======
-Forçar 1 thread interna por biblioteca via:
-  1. Variáveis de ambiente — lidas pelas libs na inicialização (antes do import)
-  2. APIs diretas — aplicadas após o import, para libs que ignoram env vars
+SOLUÇÃO: forçar 1 thread interna por biblioteca via variáveis de ambiente (antes
+do import) e via APIs diretas (depois do import). O paralelismo real vem das N
+threads de OCR gerenciadas pelo ThreadPoolExecutor.
 
-O paralelismo real vem das N threads de OCR gerenciadas pelo ThreadPoolExecutor,
-não dos sub-threads de cada biblioteca.
+SSL
+===
+Em ambientes institucionais (universidades, empresas) e Windows sem OpenSSL
+configurado, o Python pode falhar em verificar certificados HTTPS porque:
+  1. O arquivo de cert do sistema não existe (ex: Windows sem OpenSSL instalado)
+  2. Um proxy corporativo substitui certificados SSL por um cert próprio
+
+patch_ssl_certifi() aponta o SSL para o bundle do certifi (já instalado como
+dependência), resolvendo ambos os casos sem comprometer a segurança.
 
 ORDEM DE CHAMADA
 ================
-  force_single_thread_env()   ← ANTES de qualquer import de torch/cv2/onnx
+  patch_ssl_certifi()           ← ANTES de qualquer import de requests/urllib3
+  force_single_thread_env()     ← ANTES de qualquer import de torch/cv2/onnx
   apply_library_thread_limits() ← DEPOIS dos imports
 """
 
 import os
 
 
-# Variáveis de ambiente que controlam pools de threads em diversas libs.
+# ── SSL ───────────────────────────────────────────────────────────────────────
+
+def patch_ssl_certifi() -> None:
+    """
+    Aponta o SSL do Python para o bundle de certificados do certifi.
+
+    Resolve dois problemas comuns em ambientes institucionais e Windows:
+      1. Arquivo de cert do sistema ausente — Python falha em todo HTTPS
+      2. Proxy corporativo com interceptação SSL
+
+    Usa setdefault() para não sobrescrever variáveis já definidas pelo usuário.
+    Deve ser chamada ANTES de qualquer import de requests / urllib3 /
+    huggingface_hub (que faz o download dos modelos OCR e YOLO).
+    """
+    try:
+        import certifi
+        os.environ.setdefault("SSL_CERT_FILE",      certifi.where())
+        os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+    except ImportError:
+        pass  # certifi não instalado — ignora silenciosamente
+
+
+# ── Threading ─────────────────────────────────────────────────────────────────
+
 _THREAD_ENV_VARS = (
     "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
@@ -61,12 +90,6 @@ def apply_library_thread_limits() -> None:
     Deve ser chamada DEPOIS que as libs foram importadas. Complementa
     force_single_thread_env() para libs que ignoram variáveis de ambiente
     após já terem sido carregadas.
-
-    ONNX Runtime (usado pelo YOLO e pelo fast-plate-ocr) gerencia seus
-    próprios threads internos e é configurado pelo runtime_options do
-    InferenceSession. Para o fast-plate-ocr, o comportamento padrão do
-    onnxruntime é adequado: a sessão é thread-safe para inferência e o
-    número de threads internos é controlado automaticamente.
     """
     try:
         import torch
@@ -74,7 +97,6 @@ def apply_library_thread_limits() -> None:
         try:
             torch.set_num_interop_threads(1)
         except RuntimeError:
-            # set_num_interop_threads só pode ser chamado uma vez por processo.
             pass
     except ImportError:
         pass

@@ -166,13 +166,16 @@ def read_plate_text(
     if len(text) < OCR_MIN_PLATE_LEN:
         return "", 0.0
 
-    # Filtro de confiança mínima
-    confidence = 0.0
-    if hasattr(pred, "avg_confidence") and pred.avg_confidence is not None:
+    # Extrai confiança média dos caracteres reconhecidos.
+    # fast-plate-ocr usa `char_probs` (List[float], um valor por posição de caractere).
+    # Se não disponível (campo ausente ou vazio), assume 1.0 — aceita a leitura.
+    confidence = 1.0
+    char_probs = getattr(pred, "char_probs", None)
+    if char_probs is not None and len(char_probs) > 0:
         try:
-            confidence = float(pred.avg_confidence)
+            confidence = float(sum(char_probs)) / len(char_probs)
         except (TypeError, ValueError):
-            confidence = 0.0
+            confidence = 1.0
 
     if confidence < OCR_MIN_CONFIDENCE:
         return "", 0.0

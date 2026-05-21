@@ -24,8 +24,9 @@ Destaques da v10:
 # ⚠️  force_single_thread_env() DEVE ser chamada antes de qualquer import de
 # torch / cv2 / onnxruntime / ultralytics — ou as libs spawnam sub-threads
 # que competem com os workers de OCR e geram contenção.
-from src.runtime import force_single_thread_env
+from src.runtime import force_single_thread_env, patch_ssl_certifi
 force_single_thread_env()
+patch_ssl_certifi()   # resolve SSL em Windows sem cert.pem e proxies corporativos
 
 import argparse
 import sys
