@@ -1,16 +1,17 @@
 """
-executor.py — Orquestração dos modos de execução (v9).
+executor.py — Orquestração dos modos de execução.
 
-Dois modos de execução:
+Dois modos disponíveis:
 
-  serial    Baseline sequencial — 1 thread, YOLO + OCR em sequência.
-            Sem paralelismo. Usado para medir o tempo base.
+  serial    Baseline sequencial. 1 thread, YOLO → OCR por imagem.
+            Usado para medir o tempo base sem qualquer paralelismo.
 
   parallel  Two-stage com threading:
-              Estágio 1: YOLO em batch no processo principal
-              Estágio 2: N threads (não processos!) executam OCR em paralelo
-            Cada thread tem sua própria instância RapidOCR via threading.local.
-            ONNX Runtime libera o GIL durante inferência → paralelismo real.
+              Estágio 1: YOLO/ONNX em batch (processo principal)
+              Estágio 2: N threads executam fast-plate-ocr em paralelo
+            Todas as threads compartilham um único LicensePlateRecognizer
+            (singleton thread-safe). O modelo ONNX é carregado uma única
+            vez no warmup, sem overhead de inicialização por thread.
 """
 
 import sys
@@ -34,15 +35,19 @@ from src.logger import get_logger
 _YOLO_BATCH_SIZE  = 8
 _IMAGE_NAME_WIDTH = 40
 _BAR_WIDTH        = 20
-_LINE_WIDTH       = 95    # largura para sobrescrever a barra via \r
+_LINE_WIDTH       = 95   # largura para sobrescrever a barra via \r
 
 
 # ── Hardware ──────────────────────────────────────────────────────────────────
 
 def get_hardware_info() -> dict:
-    """Coleta informações de hardware para diagnóstico."""
-    info = {"logical_cores": 1, "physical_cores": 1,
-            "ram_total_gb": 0.0, "ram_avail_gb": 0.0}
+    """Coleta informações de hardware para diagnóstico e recomendação."""
+    info = {
+        "logical_cores":  1,
+        "physical_cores": 1,
+        "ram_total_gb":   0.0,
+        "ram_avail_gb":   0.0,
+    }
     try:
         import psutil
         info["logical_cores"]  = psutil.cpu_count(logical=True)  or 1
@@ -57,7 +62,7 @@ def get_hardware_info() -> dict:
 
 
 def print_hardware_info() -> None:
-    """Imprime info de hardware em formato compacto."""
+    """Imprime informações de hardware em formato compacto."""
     info = get_hardware_info()
     print(paint("\n===== HARDWARE =====", C.CYAN_BOLD))
     print(
@@ -70,32 +75,33 @@ def print_hardware_info() -> None:
 
 def recommend_workers(hw: dict) -> int:
     """
-    Calcula o número recomendado de workers baseado em hardware.
+    Calcula o número recomendado de workers com base em hardware.
 
-    Fórmula: min(physical_cores, floor(ram_avail_gb / 0.4))
-    Cada instância RapidOCR consome ~200-400 MB; 0.4 GB é conservador.
-    Sem limite máximo: o usuário pode rodar 12+ para benchmark acadêmico.
+    Fórmula: min(physical_cores, floor(ram_avail_gb / 0.15))
+
+    O fast-plate-ocr compartilha um singleton ONNX (~100 MB). A RAM por worker
+    é consumida principalmente pelo buffer de imagem e overhead de thread
+    (~50-150 MB cada). O limite padrão é conservador.
+
+    O usuário pode exceder este valor para benchmarks acadêmicos.
     """
     by_cpu = hw["physical_cores"]
-    by_ram = max(1, int(hw["ram_avail_gb"] / 0.4))
+    by_ram = max(1, int(hw["ram_avail_gb"] / 0.15))
     return min(by_cpu, by_ram)
 
 
-# ── Diagnóstico de workers — chamado na seção de CONFIGURAÇÃO (main.py) ───────
+# ── Diagnóstico de workers ────────────────────────────────────────────────────
 
 def print_worker_diagnostics(requested: int) -> None:
     """
-    Imprime informação sobre a configuração de workers escolhida.
+    Informa sobre a configuração de workers escolhida.
 
-    B4: chamada em resolve_execution() (main.py), na seção de CONFIGURAÇÃO,
-    não durante a execução do pipeline. Assim o output não aparece
-    intercalado com barras de progresso e resultados.
-
-    Não restringe a escolha do usuário — apenas informa o contexto.
-    Válido rodar com 12+ threads para coletar dados de benchmark acadêmico.
+    Chamada em resolve_execution() (main.py), na seção CONFIGURAÇÃO,
+    antes do pipeline iniciar — evita output intercalado com progresso.
+    Não restringe a escolha do usuário.
     """
-    log  = get_logger()
-    info = get_hardware_info()
+    log      = get_logger()
+    info     = get_hardware_info()
     physical = info["physical_cores"]
     logical  = info["logical_cores"]
 
@@ -111,8 +117,8 @@ def print_worker_diagnostics(requested: int) -> None:
         ))
     else:
         log.info(paint(
-            f"[INFO] {requested} thread(s) > {logical} lógicos → oversubscription "
-            "(válido para benchmark)",
+            f"[INFO] {requested} thread(s) > {logical} lógicos → "
+            "oversubscription (válido para benchmark)",
             C.YELLOW
         ))
 
@@ -125,9 +131,7 @@ class _ProgressBar:
 
     Atualiza a linha de progresso in-place via \\r (carriage return).
     Resultados são impressos acima da barra, que permanece na última linha.
-
-    Em ambientes não-TTY (output redirecionado para arquivo), a barra é
-    desativada automaticamente — apenas os resultados são impressos.
+    Em ambientes não-TTY (output redirecionado), imprime apenas os resultados.
     """
 
     FILL  = "█"
@@ -148,7 +152,7 @@ class _ProgressBar:
         bar    = self.FILL * filled + self.EMPTY * (_BAR_WIDTH - filled)
 
         elapsed = time.perf_counter() - self.t_start
-        if n > 0 and n < total:
+        if 0 < n < total:
             eta     = elapsed / n * (total - n)
             eta_str = f"~{eta:.0f}s restantes"
         elif n >= total:
@@ -160,7 +164,7 @@ class _ProgressBar:
         return f"  {lbl}[{bar}]  {n}/{total}  {pct*100:.0f}%  {eta_str}"
 
     def start(self) -> None:
-        """Exibe a barra inicial sem newline (cursor fica no fim da linha)."""
+        """Exibe a barra inicial sem newline."""
         if self._is_tty:
             sys.stdout.write(self._render().ljust(_LINE_WIDTH))
             sys.stdout.flush()
@@ -169,10 +173,8 @@ class _ProgressBar:
         """
         Incrementa contador e atualiza a barra.
 
-        Se result_line for fornecido:
-          - Sobrescreve a linha atual com o resultado (+ \\n)
-          - Desenha a nova barra na linha seguinte (sem \\n)
-        Sem result_line: apenas redesenha a barra no lugar.
+        Se result_line for fornecido, imprime-o acima da barra (com newline)
+        e redesenha a barra na mesma linha (sem newline).
         """
         self.completed += 1
         if not self._is_tty:
@@ -198,8 +200,10 @@ class _ProgressBar:
 
 # ── Entry point público ───────────────────────────────────────────────────────
 
-def run_tasks(tasks: list, yolo_model: str, execution: str = "serial",
-              workers: int = 1) -> tuple:
+def run_tasks(
+    tasks: list, yolo_model: str,
+    execution: str = "serial", workers: int = 1,
+) -> tuple:
     """
     Executa as tasks no modo indicado.
 
@@ -216,17 +220,15 @@ def run_tasks(tasks: list, yolo_model: str, execution: str = "serial",
         init_serial_worker(yolo_model)
         results = []
         n       = len(tasks)
-
-        bar = _ProgressBar(n, label="")
+        bar     = _ProgressBar(n)
         bar.start()
 
         for i, task in enumerate(tasks, 1):
             r = process_image_serial(task)
             results.append(r)
             yolo_time += r.get("yolo_time_s", 0.0)
-            ocr_time  += r.get("ocr_time_s", 0.0)
-            line = _format_result_line(i, n, r, mode="serial")
-            bar.update(line)
+            ocr_time  += r.get("ocr_time_s",  0.0)
+            bar.update(_format_result_line(i, n, r, mode="serial"))
 
         bar.finish()
 
@@ -234,7 +236,7 @@ def run_tasks(tasks: list, yolo_model: str, execution: str = "serial",
         workers_eff = workers
         results, yolo_time, ocr_time = _run_parallel(tasks, yolo_model, workers_eff)
     else:
-        raise ValueError(f"Modo desconhecido: {execution}")
+        raise ValueError(f"Modo desconhecido: {execution!r}")
 
     elapsed = time.perf_counter() - t_start
     return results, elapsed, workers_req, workers_eff, yolo_time, ocr_time
@@ -246,10 +248,16 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
     """
     Two-stage pipeline com threading no OCR.
 
-    Estágio 1: YOLO em batch no processo principal.
-    Estágio 2: N threads consomem da fila de crops e fazem OCR.
+    Estágio 1: YOLO/ONNX em batch no processo principal.
+    Estágio 2: N threads consomem a lista de crops e executam OCR.
 
-    Retorna (all_results, yolo_time_total, ocr_time_total).
+    Retorna (all_results, yolo_time_wall, ocr_time_sum).
+
+    Nota sobre ocr_time:
+      ocr_time_sum é a SOMA dos tempos OCR individuais de cada thread.
+      O tempo wall-clock do Estágio 2 é menor (paralelismo real).
+      No sumário, a percentagem é calculada sobre yolo + ocr_sum para mostrar
+      a proporção do trabalho total — não o tempo de parede do estágio.
     """
     import cv2
     from ultralytics import YOLO
@@ -260,7 +268,7 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
     init_runtime()
 
     stolen_plates = tasks[0]["stolen_plates"] if tasks else set()
-    n = len(tasks)
+    n             = len(tasks)
 
     # ── Estágio 1: YOLO em batch ──────────────────────────────────────────────
     print(paint(
@@ -273,9 +281,9 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
     CROPS_DIR.mkdir(parents=True, exist_ok=True)
     PREPROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-    all_results: list     = [None] * n
-    ocr_tasks:   list     = []
-    no_plate_names: list  = []   # B3: para exibição compacta
+    all_results:    list = [None] * n
+    ocr_tasks:      list = []
+    no_plate_names: list = []
 
     for batch_start in range(0, n, _YOLO_BATCH_SIZE):
         batch_tasks = tasks[batch_start: batch_start + _YOLO_BATCH_SIZE]
@@ -283,13 +291,14 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
         loaded      = [img is not None for img in images]
 
         valid_imgs = [img for img, ok in zip(images, loaded) if ok]
-        valid_detections = []
+        valid_dets: list = []
         if valid_imgs:
             try:
-                valid_detections = yolo_model_obj(valid_imgs, verbose=False)
-            except Exception:
-                valid_detections = [None] * len(valid_imgs)
-        det_iter = iter(valid_detections)
+                valid_dets = yolo_model_obj(valid_imgs, verbose=False)
+            except Exception as exc:
+                log.warning("[YOLO] Batch falhou: %s", exc)
+                valid_dets = [None] * len(valid_imgs)
+        det_iter = iter(valid_dets)
 
         for idx_in_batch, (task, img, ok) in enumerate(
             zip(batch_tasks, images, loaded)
@@ -298,7 +307,7 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
             stem       = Path(task["image_path"]).stem
             image_name = Path(task["image_path"]).name
 
-            base_result = {
+            base = {
                 "image":             image_name,
                 "plate_detected":    False,
                 "plate_text":        "",
@@ -309,13 +318,13 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
                 "ocr_confidence":    0.0,
                 "crop_path":         "",
                 "preprocessed_path": "",
-                "worker_id":         0,    # B2: sem pid no parallel
+                "worker_id":         0,
                 "error":             "",
             }
 
             if not ok:
-                base_result["error"] = "Não foi possível carregar a imagem."
-                all_results[global_idx] = base_result
+                base["error"] = "Não foi possível carregar a imagem."
+                all_results[global_idx] = base
                 no_plate_names.append(image_name)
                 continue
 
@@ -323,23 +332,24 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
             crop = extract_best_crop(img, [det]) if det is not None else None
 
             if crop is None:
-                all_results[global_idx] = base_result
+                all_results[global_idx] = base
                 no_plate_names.append(image_name)
                 continue
 
             crop_path = CROPS_DIR        / f"{stem}_crop.jpg"
             prep_path = PREPROCESSED_DIR / f"{stem}_prep.jpg"
             cv2.imwrite(str(crop_path), crop)
-            preprocessed = preprocess_plate(crop)
-            cv2.imwrite(str(prep_path), preprocessed)
+            cv2.imwrite(str(prep_path), preprocess_plate(crop))
 
-            base_result["plate_detected"]    = True
-            base_result["crop_path"]         = str(crop_path)
-            base_result["preprocessed_path"] = str(prep_path)
+            base.update({
+                "plate_detected":    True,
+                "crop_path":         str(crop_path),
+                "preprocessed_path": str(prep_path),
+            })
 
             ocr_tasks.append({
                 "global_idx":        global_idx,
-                "result_base":       base_result,
+                "result_base":       base,
                 "crop_path":         str(crop_path),
                 "preprocessed_path": str(prep_path),
                 "stolen_plates":     stolen_plates,
@@ -347,9 +357,8 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
 
     yolo_elapsed = time.perf_counter() - t_yolo_start
     plates_found = len(ocr_tasks)
-    no_plate_cnt = len(no_plate_names)
+    no_plate_cnt = n - plates_found
 
-    # B3: sumário compacto do estágio 1 — sem índices globais, sem worker_id
     print(paint(
         f"  [Estágio 1/2] Concluído em {yolo_elapsed:.2f}s"
         f"  →  {plates_found} com placa  |  {no_plate_cnt} sem placa",
@@ -358,19 +367,18 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
 
     if no_plate_names:
         print(paint(f"  Sem placa ({no_plate_cnt}):", C.GRAY))
-        shown = no_plate_names[:6]
-        for name in shown:
+        for name in no_plate_names[:6]:
             short = name if len(name) <= 48 else name[:45] + "..."
             print(paint(f"    · {short}", C.GRAY))
         if no_plate_cnt > 6:
-            print(paint(f"    · ...e mais {no_plate_cnt - 6} imagens", C.GRAY))
+            print(paint(f"    · ...e mais {no_plate_cnt - 6} imagem(ns)", C.GRAY))
     print()
 
-    # ── Estágio 2: OCR em threads ─────────────────────────────────────────────
     if not ocr_tasks:
         print(paint("  [Estágio 2/2] Nenhuma placa para processar.", C.YELLOW))
         return all_results, yolo_elapsed, 0.0
 
+    # ── Estágio 2: OCR em threads ─────────────────────────────────────────────
     print(paint(
         f"  [Estágio 2/2] OCR de {plates_found} placas em {n_workers} threads...\n",
         C.CYAN
@@ -382,24 +390,26 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
     bar = _ProgressBar(plates_found, label="OCR")
     bar.start()
 
-    with ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix="ocr") as pool:
-        future_to_task = {pool.submit(process_ocr_threaded, ot): ot
-                          for ot in ocr_tasks}
+    with ThreadPoolExecutor(
+        max_workers=n_workers, thread_name_prefix="ocr"
+    ) as pool:
+        future_to_task = {
+            pool.submit(process_ocr_threaded, ot): ot
+            for ot in ocr_tasks
+        }
         for future in as_completed(future_to_task):
             ot         = future_to_task[future]
             global_idx = ot["global_idx"]
             try:
                 result = future.result()
             except Exception as exc:
-                result           = ot["result_base"].copy()
-                result["error"]  = str(exc)
+                result          = ot["result_base"].copy()
+                result["error"] = str(exc)
                 result["status"] = STATUS_ERROR
 
             all_results[global_idx]  = result
             ocr_total_time          += result.get("ocr_time_s", 0.0)
-
-            line = _format_result_line(global_idx + 1, n, result, mode="parallel")
-            bar.update(line)
+            bar.update(_format_result_line(global_idx + 1, n, result, mode="parallel"))
 
     bar.finish()
 
@@ -409,38 +419,40 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
     return all_results, yolo_elapsed, ocr_total_time
 
 
-# ── Formatação de resultado ───────────────────────────────────────────────────
+# ── Formatação de linha de resultado ──────────────────────────────────────────
 
 def _short_name(name: str, max_len: int = _IMAGE_NAME_WIDTH) -> str:
-    """Trunca nome de arquivo longo com '...' no fim."""
+    """Trunca nome de arquivo longo com '...' mantendo comprimento fixo."""
     if len(name) <= max_len:
         return name.ljust(max_len)
     return (name[:max_len - 3] + "...").ljust(max_len)
 
 
 def _status_color(status: str) -> str:
-    """Mapeamento de status para cor ANSI."""
-    if status == STATUS_STOLEN:    return C.RED_BOLD
-    if status == STATUS_OK:        return C.GREEN
-    if status == STATUS_ERROR:     return C.MAGENTA
-    return C.YELLOW   # NAO_IDENTIFICADA
+    """Mapeia status para código de cor ANSI."""
+    return {
+        STATUS_STOLEN:      C.RED_BOLD,
+        STATUS_OK:          C.GREEN,
+        STATUS_ERROR:       C.MAGENTA,
+        STATUS_UNIDENTIFIED: C.YELLOW,
+    }.get(status, C.YELLOW)
 
 
-def _format_result_line(current: int, total: int, result: dict,
-                         mode: str = "serial") -> str:
+def _format_result_line(
+    current: int, total: int, result: dict, mode: str = "serial"
+) -> str:
     """
-    Formata uma linha de resultado completa como string.
+    Formata linha de resultado completa para exibição no terminal.
 
-    B2: serial usa 'pid=', parallel usa 'tid=' para deixar claro o tipo
-    de identificador. worker_id guarda o PID real no serial e o thread ID
-    truncado no parallel.
+    serial   → 'pid=XXXXX'  (identificador do processo)
+    parallel → 'tid=XXXXXX' (identificador da thread, truncado)
     """
-    plate  = result.get("plate_text") or "—"
-    status = result.get("status", "?")
-    image  = result.get("image", "?")
-    wid    = result.get("worker_id", "?")
-    t      = result.get("total_time_s", 0.0)
-    width  = len(str(total))
+    plate   = result.get("plate_text") or "—"
+    status  = result.get("status", "?")
+    image   = result.get("image", "?")
+    wid     = result.get("worker_id", "?")
+    t       = result.get("total_time_s", 0.0)
+    width   = len(str(total))
     counter = f"[{current:>{width}}/{total}]"
     name    = _short_name(image)
     color   = _status_color(status)
@@ -452,6 +464,7 @@ def _format_result_line(current: int, total: int, result: dict,
             f"status={status:<17} {wlabel}={wid}  {t:.3f}s  ⚠️  ALERTA",
             color
         )
+
     status_colored = paint(f"{status:<17}", color)
     return (
         f"  {counter} {name} placa={plate:<10} "

@@ -1,7 +1,8 @@
 """
 config.py — Configurações centrais do projeto.
 
-Todos os caminhos, constantes e parâmetros ajustáveis ficam aqui.
+Todos os caminhos, constantes e parâmetros ajustáveis estão aqui.
+Para mudar o comportamento do sistema, edite apenas este arquivo.
 """
 
 from pathlib import Path
@@ -9,7 +10,7 @@ from pathlib import Path
 
 # ── Versão ────────────────────────────────────────────────────────────────────
 
-VERSION = "9.0"
+VERSION = "10.0"
 
 
 # ── Diretórios principais ─────────────────────────────────────────────────────
@@ -26,60 +27,59 @@ MODELS_DIR       = BASE_DIR / "models"
 # ── Arquivos ──────────────────────────────────────────────────────────────────
 
 DEFAULT_YOLO_MODEL = MODELS_DIR / "license_plate_detector.pt"
-STOLEN_PLATES_FILE = DATA_DIR / "stolen_plates.txt"
+STOLEN_PLATES_FILE = DATA_DIR  / "stolen_plates.txt"
 
 
-# ── Extensões aceitas ─────────────────────────────────────────────────────────
+# ── Extensões de imagem aceitas ───────────────────────────────────────────────
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
-# ── Parâmetros do detector ────────────────────────────────────────────────────
+# ── Parâmetros do detector YOLO ───────────────────────────────────────────────
 
-# Expansão do bounding box do YOLO antes do crop. O YOLO às vezes detecta a
-# placa com a caixa apertada, cortando dígitos das bordas. 8% costuma ser o
-# suficiente sem incluir muito fundo na imagem.
+# Expansão do bounding box antes do crop. 8% cobre casos em que o YOLO aperta
+# a caixa e corta dígitos nas bordas da placa.
 BBOX_PADDING_RATIO = 0.08
 
 
-# ── Parâmetros do OCR ─────────────────────────────────────────────────────────
+# ── Motor OCR ─────────────────────────────────────────────────────────────────
 
-# Score mínimo para considerar uma leitura boa o suficiente e pular as
-# variantes restantes (early exit). Reduzido de 10.0 → 7.5:
-#   Score 7.5 = letras+dígitos (+4) + tamanho certo (+2) + conf ≥ 0.5 (+1.5)
-#   É uma leitura confiável sem exigir quase-perfeição.
-OCR_EARLY_EXIT_SCORE = 7.5
+# Modelo CCT pré-treinado em 65+ países via fast-plate-ocr (MIT License).
+# O modelo é baixado automaticamente na primeira execução (~3-6 MB, uma vez).
+#
+# Opções disponíveis:
+#   "cct-s-v2-global-model"   → mais preciso  (~0.68ms GPU / ~30-80ms CPU)  ← padrão
+#   "cct-xs-v2-global-model"  → mais rápido   (~0.47ms GPU / ~20-50ms CPU)
+#
+# Para pipelines onde o YOLO é o gargalo dominante (este projeto), a diferença
+# de velocidade entre s e xs é negligenciável. Prefira s para melhor precisão.
+FAST_OCR_MODEL = "cct-s-v2-global-model"
 
-# Altura mínima de uma variante de crop para considerá-la viável para OCR.
-OCR_MIN_VARIANT_HEIGHT = 10
+# Comprimento mínimo de placa aceito (caracteres alfanuméricos).
+# Leituras com menos caracteres são descartadas como leituras parciais.
+OCR_MIN_PLATE_LEN = 4
 
-# Largura máxima do crop antes de enviar ao OCR (px).
-# Crops mais largos são redimensionados via INTER_AREA antes da inferência.
-# O RapidOCR processa imagens largas mais devagar sem ganho de precisão
-# para texto estruturado como placas.
-OCR_MAX_CROP_WIDTH = 320
-
-# Score mínimo na variante 1 para não pular a variante 2.
-# Se variante 1 retornar score abaixo deste valor (quase sem texto detectado),
-# pula direto para variante 3 (metade inferior), que tende a ser mais útil
-# para placas de duas linhas do que a variante 2 (sem topo decorativo).
-OCR_SKIP_VARIANT2_SCORE = 2.0
+# Confiança média mínima retornada pelo OCR (0.0 a 1.0).
+# Leituras com confiança abaixo deste limiar são descartadas.
+OCR_MIN_CONFIDENCE = 0.20
 
 
 # ── Status possíveis ──────────────────────────────────────────────────────────
 
-STATUS_OK              = "OK"
-STATUS_STOLEN          = "ROUBADO"
-STATUS_UNIDENTIFIED    = "NAO_IDENTIFICADA"
-STATUS_ERROR           = "ERRO"
+STATUS_OK           = "OK"
+STATUS_STOLEN       = "ROUBADO"
+STATUS_UNIDENTIFIED = "NAO_IDENTIFICADA"
+STATUS_ERROR        = "ERRO"
 
 
-# ── Blacklist de palavras que nunca são parte de uma placa ────────────────────
-# Nomes de estado/cidade/marca/slogans que o OCR pode capturar de letreiros
-# no entorno. Genérico para múltiplos países.
+# ── Blacklist de palavras que nunca fazem parte de uma placa ──────────────────
+# Pós-filtro aplicado ao resultado do OCR para descartar leituras de letreiros,
+# emblemas e textos decorativos no entorno da placa.
+# O filtro compara a leitura completa (normalizada, sem espaços) contra as
+# entradas desta lista.
 
-WORD_BLACKLIST = {
-    # EUA / América do Norte
+WORD_BLACKLIST: frozenset = frozenset({
+    # EUA — estados e termos institucionais
     "WASHINGTON", "EVERGREEN", "STATE", "COUNTY", "DISTRICT",
     "CALIFORNIA", "TEXAS", "FLORIDA", "NEVADA", "ARIZONA",
     "OREGON", "COLORADO", "UTAH", "MONTANA", "IDAHO",
@@ -91,8 +91,8 @@ WORD_BLACKLIST = {
     "POLICIA", "POLICE", "TRANSIT", "GOVERNMENT", "FEDERAL",
     "REPUBLIC", "NACIONAL", "MUNICIPAL", "ESTADUAL", "OFFICIAL",
     "UNITED", "STATES", "AMERICA",
-    # Marcas / modelos / decorações comuns
-    "BUS", "CITY", "HYBRID", "PRIUS", "GENERATION", "ELECTRIC",
-    # Palavras curtas que nunca são placas
+    # Marcas e decorações comuns
+    "BUS", "CITY", "HYBRID", "ELECTRIC", "GENERATION",
+    # Artigos e preposições (nunca são placas)
     "THE", "AND", "FOR",
-}
+})

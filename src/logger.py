@@ -1,5 +1,5 @@
 """
-logger.py — Logging estruturado centralizado (v9).
+logger.py — Logging estruturado centralizado.
 
 Separa mensagens de diagnóstico (INFO, WARNING, DEBUG) do output visual
 (barras de progresso, resultados por imagem), que continuam via print().
@@ -33,7 +33,7 @@ def setup_logger(verbose: bool = False, quiet: bool = False) -> logging.Logger:
     logger = logging.getLogger(_LOGGER_NAME)
 
     if logger.handlers:
-        return logger   # Já configurado — evita handlers duplicados
+        return logger  # Já configurado — evita handlers duplicados
 
     if quiet:
         level = logging.WARNING
@@ -43,6 +43,7 @@ def setup_logger(verbose: bool = False, quiet: bool = False) -> logging.Logger:
         level = logging.INFO
 
     logger.setLevel(level)
+    logger.propagate = False  # Impede que mensagens subam ao root logger (evita duplicatas)
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(level)

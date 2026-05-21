@@ -1,13 +1,13 @@
-# Compatível com Python 3.9 a 3.13
-# Se a instalação falhar em alguma lib, rode: pip install -r requirements.txt --upgrade
+# Compatível com Python 3.10 a 3.13
+# Se a instalação falhar, rode: pip install -r requirements.txt --upgrade
 
 opencv-python>=4.8.0
 numpy>=1.24.0
 Pillow>=10.0.0
 
-# rapidocr: sem versão pinada para compatibilidade máxima entre Python 3.9-3.13
-# Versões 1.3.x requerem Python <3.12; versões 1.2.x funcionam em Python 3.12+
-rapidocr-onnxruntime
+# fast-plate-ocr: OCR especializado em placas (CCT - Compact Convolutional Transformer)
+# Treinado em 65+ países, usa ONNX Runtime, sem confusão L/D
+fast-plate-ocr[onnx]>=1.1.0
 
 ultralytics>=8.0.0
 psutil>=5.9.0

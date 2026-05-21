@@ -1,23 +1,29 @@
 """
-Comparador Paralelo de Placas — v9.0
+Comparador Paralelo de Placas v10.0
 =====================================
 
-Pipeline YOLO (detecção) + RapidOCR (reconhecimento) com comparação contra
-lista de placas roubadas. Dois modos de execução:
+Pipeline YOLO/ONNX (detecção) + fast-plate-ocr/CCT (reconhecimento) com
+comparação contra lista de placas roubadas. Dois modos de execução:
 
-  serial    1 thread, YOLO → OCR sequencial. Baseline para medição.
+  serial    1 thread, YOLO → OCR sequencial. Baseline para benchmark.
 
   parallel  Two-stage com threading:
-              Estágio 1: YOLO em batch no processo principal
-              Estágio 2: N threads executam OCR em paralelo
-            Threads compartilham memória do processo, mantendo os pesos do
-            modelo aquecidos no cache L3 do CPU. ONNX Runtime libera o GIL
-            durante inferência, então o paralelismo é real.
+              Estágio 1: YOLO/ONNX em batch (processo principal)
+              Estágio 2: N threads executam fast-plate-ocr em paralelo
+            Todas as threads compartilham um único modelo ONNX carregado no
+            warmup — sem overhead de inicialização por thread.
+
+Destaques da v10:
+  • OCR: RapidOCR → CCT/fast-plate-ocr  (16x mais rápido, sem confusão L↔D)
+  • YOLO: PyTorch  → ONNX (exportado automaticamente na 1ª execução, ~2-3x)
+  • Speedup de paralelismo limitado pela Lei de Amdahl: com YOLO dominando
+    ~95% do tempo serial, o benefício de N threads é próximo de 1.0x.
+    O ONNX do YOLO reduz essa fração, recuperando parte do speedup.
 """
 
-# ⚠️  Limites de thread DEVEM ser configurados antes de qualquer import de
-# torch/cv2/onnx/ultralytics — senão cada lib spawn ~8 threads e gera
-# contention massiva entre as nossas N threads de OCR.
+# ⚠️  force_single_thread_env() DEVE ser chamada antes de qualquer import de
+# torch / cv2 / onnxruntime / ultralytics — ou as libs spawnam sub-threads
+# que competem com os workers de OCR e geram contenção.
 from src.runtime import force_single_thread_env
 force_single_thread_env()
 
@@ -26,20 +32,20 @@ import sys
 import time
 from pathlib import Path
 
-from src.colors import enable_ansi_colors, C, paint
-from src.config import (
+from src.colors  import enable_ansi_colors, C, paint
+from src.config  import (
     INPUT_DIR, OUTPUT_DIR, STOLEN_PLATES_FILE, DEFAULT_YOLO_MODEL, VERSION,
 )
-from src.dataset import ensure_directories, list_images, load_stolen_plates
-from src.detector import warmup_yolo
-from src.ocr import warmup_ocr
+from src.dataset  import ensure_directories, list_images, load_stolen_plates
+from src.detector import warmup_yolo, ensure_onnx_export
+from src.ocr      import warmup_ocr
 from src.executor import (
     run_tasks, print_hardware_info, get_hardware_info,
     recommend_workers, print_worker_diagnostics,
 )
-from src.report import save_results_csv, save_performance_log, print_summary
+from src.report    import save_results_csv, save_performance_log, print_summary
 from src.html_report import generate_html_report
-from src.logger import setup_logger, get_logger
+from src.logger    import setup_logger, get_logger
 
 
 VALID_EXECUTIONS = ["serial", "parallel"]
@@ -49,25 +55,38 @@ VALID_EXECUTIONS = ["serial", "parallel"]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=f"Comparador Paralelo de Placas v{VERSION}"
+        description=f"Comparador Paralelo de Placas v{VERSION}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--execution", choices=VALID_EXECUTIONS,
-                        help="Modo de execução")
-    parser.add_argument("--workers", type=int,
-                        help="Quantidade de threads para o estágio OCR")
-    parser.add_argument("--yolo-model", default=str(DEFAULT_YOLO_MODEL),
-                        help="Caminho do modelo YOLO (.pt)")
-    parser.add_argument("--no-interactive", action="store_true",
-                        help="Roda sem perguntas, usando defaults ou flags")
-    parser.add_argument("--verbose", action="store_true",
-                        help="Output de diagnóstico detalhado (nível DEBUG)")
-    parser.add_argument("--quiet", action="store_true",
-                        help="Suprime mensagens INFO; mantém apenas WARNING+")
+    parser.add_argument(
+        "--execution", choices=VALID_EXECUTIONS,
+        help="Modo de execução (serial ou parallel)",
+    )
+    parser.add_argument(
+        "--workers", type=int,
+        help="Número de threads para o estágio OCR (modo parallel)",
+    )
+    parser.add_argument(
+        "--yolo-model", default=str(DEFAULT_YOLO_MODEL),
+        help="Caminho do modelo YOLO (.pt ou .onnx)",
+    )
+    parser.add_argument(
+        "--no-interactive", action="store_true",
+        help="Executa sem perguntas interativas, usando flags ou defaults",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Output de diagnóstico detalhado (nível DEBUG)",
+    )
+    parser.add_argument(
+        "--quiet", action="store_true",
+        help="Suprime mensagens INFO; mantém apenas WARNING+",
+    )
     return parser.parse_args()
 
 
 def _ask_choice(question: str, valid: list, default: str) -> str:
-    """Pergunta uma escolha entre opções válidas (case-insensitive)."""
+    """Solicita uma escolha entre opções válidas com fallback ao default."""
     opts = "/".join(valid)
     while True:
         answer = input(f"{question} ({opts}) [padrão: {default}]: ").strip().lower()
@@ -80,11 +99,10 @@ def _ask_choice(question: str, valid: list, default: str) -> str:
 
 def _ask_workers(hw: dict) -> int:
     """
-    Pergunta o número de threads com recomendação baseada em hardware.
+    Solicita o número de threads com recomendação baseada em hardware.
 
-    A2: exibe o valor recomendado calculado, mas aceita QUALQUER inteiro >= 1.
-    O usuário pode informar 12 (ou mais) para coletar dados de benchmark,
-    mesmo que o hardware tenha menos núcleos físicos.
+    Aceita qualquer inteiro >= 1. Valores acima do número de núcleos físicos
+    são válidos para coletar dados de benchmark com oversubscription.
     """
     recommended = recommend_workers(hw)
     while True:
@@ -99,28 +117,30 @@ def _ask_workers(hw: dict) -> int:
                 return v
         except ValueError:
             pass
-        print(paint("  Digite um inteiro >= 1", C.YELLOW))
+        print(paint("  Digite um inteiro >= 1.", C.YELLOW))
 
 
 def _check_ram_warning(hw: dict, workers: int) -> None:
     """
-    A3: emite aviso se a RAM disponível pode ser insuficiente para o número
-    de workers solicitado. Não bloqueia — apenas informa.
-    ~400 MB por instância RapidOCR é uma estimativa conservadora.
-    """
-    log         = get_logger()
-    avail       = hw["ram_avail_gb"]
-    ram_needed  = workers * 0.4
+    Emite aviso se a RAM disponível pode ser insuficiente.
 
-    if avail < 1.0:
+    fast-plate-ocr usa um singleton compartilhado (~100 MB), mas cada
+    thread ainda consome RAM para buffers de imagem e overhead (~50-150 MB).
+    Não bloqueia a execução — apenas informa o usuário.
+    """
+    log        = get_logger()
+    avail      = hw["ram_avail_gb"]
+    ram_needed = workers * 0.15   # estimativa conservadora por thread
+
+    if avail < 0.5:
         log.warning(paint(
-            f"[AVISO] RAM disponível baixa ({avail:.1f} GB). "
-            f"Considere usar modo serial para evitar instabilidade.",
+            f"[AVISO] RAM disponível muito baixa ({avail:.1f} GB). "
+            "Considere usar modo serial.",
             C.YELLOW
         ))
     elif avail < ram_needed:
         log.warning(paint(
-            f"[AVISO] {workers} threads podem precisar de ~{ram_needed:.1f} GB de RAM, "
+            f"[AVISO] {workers} threads podem precisar de ~{ram_needed:.1f} GB, "
             f"mas apenas {avail:.1f} GB disponível.",
             C.YELLOW
         ))
@@ -128,10 +148,10 @@ def _check_ram_warning(hw: dict, workers: int) -> None:
 
 def resolve_execution(args: argparse.Namespace) -> tuple:
     """
-    Determina o modo e número de workers a partir dos args ou input interativo.
+    Determina modo e número de workers a partir dos args ou input interativo.
 
-    B4: print_worker_diagnostics é chamado aqui (seção de CONFIGURAÇÃO),
-    não dentro do pipeline de execução, para não intercalar com progresso.
+    print_worker_diagnostics é chamada aqui (seção CONFIGURAÇÃO), não durante
+    o pipeline — evita output intercalado com barras de progresso.
     """
     hw = get_hardware_info()
 
@@ -145,9 +165,8 @@ def resolve_execution(args: argparse.Namespace) -> tuple:
         return "parallel", workers
 
     print(paint("\n===== CONFIGURAÇÃO =====", C.CYAN_BOLD))
-    execution = args.execution or _ask_choice(
-        "Execução", VALID_EXECUTIONS, "serial"
-    )
+    execution = args.execution or _ask_choice("Execução", VALID_EXECUTIONS, "serial")
+
     if execution == "serial":
         return "serial", 1
 
@@ -160,20 +179,17 @@ def resolve_execution(args: argparse.Namespace) -> tuple:
 # ── Warmup ────────────────────────────────────────────────────────────────────
 
 def run_warmup(execution: str, yolo_model: str) -> float:
-    """Carrega modelos para warm-up. Retorna o tempo gasto."""
-    log = get_logger()
+    """
+    Carrega e aquece YOLO e OCR. Retorna o tempo gasto.
+
+    Ambos os modos (serial e parallel) pré-aquecem o OCR aqui.
+    Isso elimina a latência de cold-start na primeira imagem real.
+    """
     print(paint("\n===== WARM-UP =====", C.CYAN_BOLD))
     t0 = time.perf_counter()
 
-    if execution == "serial":
-        warmup_yolo(yolo_model)
-        warmup_ocr()
-    else:
-        # No modo parallel, apenas valida que o YOLO carrega.
-        # As instâncias OCR de cada thread são criadas sob demanda.
-        from ultralytics import YOLO
-        YOLO(yolo_model)
-        log.info("[VALIDAÇÃO] YOLO OK. OCR será carregado pela primeira thread.")
+    warmup_yolo(yolo_model)
+    warmup_ocr()
 
     elapsed = time.perf_counter() - t0
     print(f"  Concluído em {elapsed:.4f}s")
@@ -185,15 +201,13 @@ def run_warmup(execution: str, yolo_model: str) -> float:
 def main() -> int:
     enable_ansi_colors()
     args = parse_args()
-
-    # A4: configura logging antes de qualquer módulo usar get_logger()
     setup_logger(verbose=args.verbose, quiet=args.quiet)
 
     print(paint(f"\n  Comparador de Placas v{VERSION}", C.CYAN_BOLD))
     print_hardware_info()
 
     execution, workers = resolve_execution(args)
-    yolo_model = args.yolo_model
+    yolo_model         = args.yolo_model
 
     ensure_directories()
 
@@ -207,6 +221,23 @@ def main() -> int:
         print(paint(f"\n[ERRO] Nenhuma imagem em {INPUT_DIR}", C.RED_BOLD))
         return 1
 
+    # ── Export ONNX (feito uma vez, reutilizado nas execuções seguintes) ───────
+    onnx_path = Path(yolo_model).with_suffix(".onnx")
+    needs_export = not onnx_path.exists() and not yolo_model.endswith(".onnx")
+
+    if needs_export:
+        print(paint("\n===== ONNX EXPORT =====", C.CYAN_BOLD))
+        print("  Exportando YOLO para ONNX — feito UMA VEZ, ~30-60s...")
+        t_export = time.perf_counter()
+        yolo_model = ensure_onnx_export(yolo_model)
+        elapsed_export = time.perf_counter() - t_export
+        print(paint(
+            f"  Concluído em {elapsed_export:.1f}s  →  {Path(yolo_model).name}",
+            C.GREEN
+        ))
+    else:
+        yolo_model = ensure_onnx_export(yolo_model)
+
     try:
         warmup_time = run_warmup(execution, yolo_model)
     except Exception as exc:
@@ -214,7 +245,6 @@ def main() -> int:
         return 1
 
     stolen_plates = load_stolen_plates(STOLEN_PLATES_FILE)
-
     tasks = [
         {"image_path": str(p), "stolen_plates": stolen_plates}
         for p in images
@@ -227,7 +257,7 @@ def main() -> int:
     print(f"  Modelo    : {yolo_model}\n")
 
     results, elapsed, w_req, w_eff, yolo_time, ocr_time = run_tasks(
-        tasks, yolo_model, execution=execution, workers=workers
+        tasks, yolo_model, execution=execution, workers=workers,
     )
 
     results_file     = OUTPUT_DIR / "results.csv"
