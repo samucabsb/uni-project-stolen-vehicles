@@ -113,5 +113,5 @@ project/
     ├── report.py        CSVs + sumário terminal
     └── html_report.py   Relatório HTML interativo
 ```
-##Tempo atual serial com 50.000 placas sintéticas
+## Tempo atual serial com 50.000 placas sintéticas
   1 Hora de 40 segundos 
