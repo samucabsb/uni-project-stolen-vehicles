@@ -67,17 +67,17 @@ O sistema implementa um **pipeline de dois estágios** com paralelismo no segund
 │  Estágio 1 — SERIAL (processo principal)                        │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Para cada lote de 8 imagens:                            │   │
-│  │  cv2.imread() → YOLO v8 ONNX → bounding boxes → crops   │   │
+│  │  cv2.imread() → YOLO v8 ONNX → bounding boxes → crops    │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                           │                                     │
 │                    crops em disco                               │
 │                           │                                     │
 │  Estágio 2 — PARALELO (N threads via ThreadPoolExecutor)        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │  Thread 1    │  │  Thread 2    │  │  Thread N    │          │
-│  │  OCR (CCT)   │  │  OCR (CCT)   │  │  OCR (CCT)   │          │
-│  │  placa → txt │  │  placa → txt │  │  placa → txt │          │
-│  └──────────────┘  └──────────────┘  └──────────────┘          │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
+│  │  Thread 1    │  │  Thread 2    │  │  Thread N    │           │
+│  │  OCR (CCT)   │  │  OCR (CCT)   │  │  OCR (CCT)   │           │
+│  │  placa → txt │  │  placa → txt │  │  placa → txt │           │
+│  └──────────────┘  └──────────────┘  └──────────────┘           │
 │         └────────────────┴────────────────┘                     │
 │                    resultados                                   │
 └─────────────────────────────────────────────────────────────────┘
