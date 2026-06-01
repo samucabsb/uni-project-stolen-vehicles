@@ -6,7 +6,7 @@
 ![OCR](https://img.shields.io/badge/OCR-fast--plate--ocr-8b5cf6?style=for-the-badge)
 ![Status](https://img.shields.io/badge/Status-Finalizado-22c55e?style=for-the-badge)
 
-**Disciplina:** Computação Paralela e Distribuída  
+**Disciplina:** Programação Concorrente e Distribuída  
 **Alunos:** Samuel de Souza Rodrigues · Kaio Kevin  
 **Turma:** 5º Semestre — ADS  
 **Professor:** Rafael Marconi  
@@ -293,4 +293,4 @@ uni-project-stolen-vehicles/
 
 ---
 
-Projeto desenvolvido para a disciplina de **Computação Paralela e Distribuída**.
+Projeto desenvolvido para a disciplina de **Programação Concorrente e Distribuída**.
