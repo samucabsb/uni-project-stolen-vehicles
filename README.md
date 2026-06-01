@@ -448,3 +448,135 @@ Projeto desenvolvido para a disciplina de **Computação Concorrente e Distribu�
 **Samuel de Souza · Kaio Kevin** — Prof. Rafael Marconi
 
 </div>
+
+
+================================================================
+  SUMÁRIO DE EXECUÇÃO
+================================================================
+  Modo              : SERIAL
+  Workers           : 1
+  Imagens           : 2000
+  Warm-up           : 2.5555 s
+  Tempo total       : 338.7392 s
+  Média por imagem  : 0.1694 s
+  Throughput        : 5.90 img/s
+----------------------------------------------------------------
+  YOLO (detecção)   : 241.45 s  (83.2%)
+  OCR  (leitura)    :  48.82 s  (16.8%)
+----------------------------------------------------------------
+  Com placa         : 2000
+  Sem placa         : 0
+  Status OK         : 2000
+  Status ROUBADO    : 0
+  Não identificado  : 0
+----------------------------------------------------------------
+  results.csv       : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\results.csv
+  performance_log   : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\performance_log.csv
+================================================================
+
+================================================================
+  SUMÁRIO DE EXECUÇÃO
+================================================================
+  Modo              : PARALLEL
+  Workers           : 2
+  Imagens           : 2000
+  Warm-up           : 2.4536 s
+  Tempo total       : 64.0720 s
+  Média por imagem  : 0.0320 s
+  Throughput        : 31.21 img/s
+----------------------------------------------------------------
+  YOLO (detecção)   :  47.09 s  (60.2%)
+  OCR  (leitura)    :  31.13 s  (39.8%)
+----------------------------------------------------------------
+  Com placa         : 2000
+  Sem placa         : 0
+  Status OK         : 2000
+  Status ROUBADO    : 0
+  Não identificado  : 0
+----------------------------------------------------------------
+  results.csv       : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\results.csv
+  performance_log   : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\performance_log.csv
+================================================================
+
+================================================================
+  SUMÁRIO DE EXECUÇÃO
+================================================================
+  Modo              : PARALLEL
+  Workers           : 4
+  Imagens           : 2000
+  Warm-up           : 2.4532 s
+  Tempo total       : 60.1929 s
+  Média por imagem  : 0.0301 s
+  Throughput        : 33.23 img/s
+----------------------------------------------------------------
+  YOLO (detecção)   :  45.80 s  (46.2%)
+  OCR  (leitura)    :  53.36 s  (53.8%)
+----------------------------------------------------------------
+  Com placa         : 2000
+  Sem placa         : 0
+  Status OK         : 2000
+  Status ROUBADO    : 0
+  Não identificado  : 0
+----------------------------------------------------------------
+  results.csv       : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\results.csv
+  performance_log   : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\performance_log.csv
+================================================================
+
+================================================================
+  SUMÁRIO DE EXECUÇÃO
+================================================================
+  Modo              : PARALLEL
+  Workers           : 8
+  Imagens           : 2000
+  Warm-up           : 2.3677 s
+  Tempo total       : 66.2353 s
+  Média por imagem  : 0.0331 s
+  Throughput        : 30.20 img/s
+----------------------------------------------------------------
+  YOLO (detecção)   :  44.25 s  (20.9%)
+  OCR  (leitura)    : 167.80 s  (79.1%)
+----------------------------------------------------------------
+  Com placa         : 2000
+  Sem placa         : 0
+  Status OK         : 2000
+  Status ROUBADO    : 0
+  Não identificado  : 0
+----------------------------------------------------------------
+  results.csv       : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\results.csv
+  performance_log   : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\performance_log.csv
+================================================================
+
+================================================================
+  SUMÁRIO DE EXECUÇÃO
+================================================================
+  Modo              : PARALLEL
+  Workers           : 12
+  Imagens           : 2000
+  Warm-up           : 2.6063 s
+  Tempo total       : 68.7171 s
+  Média por imagem  : 0.0344 s
+  Throughput        : 29.10 img/s
+----------------------------------------------------------------
+  YOLO (detecção)   :  45.16 s  (14.3%)
+  OCR  (leitura)    : 270.61 s  (85.7%)
+----------------------------------------------------------------
+  Com placa         : 2000
+  Sem placa         : 0
+  Status OK         : 2000
+  Status ROUBADO    : 0
+  Não identificado  : 0
+----------------------------------------------------------------
+  results.csv       : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\results.csv
+  performance_log   : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\performance_log.csv
+================================================================
+
+Processador	            12th Gen Intel(R) Core(TM) i7-12700 (2.10 GHz)
+RAM instalada 	16,0 GB (utilizável: 15,7 GB)
+ID do dispositivo	260660EB-6BE0-47F6-B2E9-43C50EB621A1
+ID do Produto        	00331-10000-00001-AA661
+Tipo de sistema	Sistema operacional de 64 bits, processador baseado em x64
+Caneta e toque	Nenhuma entrada à caneta ou por toque disponível para este vídeo
+Edição	                       Windows 11 Pro
+Versão	                       24H2
+Compilação do SO	26100.8037
+Experiência	           Pacote de Experiência de Recursos do Windows 1000.26100.300.0
