@@ -1,582 +1,296 @@
 # 🚗 Detector Paralelo de Placas Veiculares
 
-<div align="center">
-
-![Version](https://img.shields.io/badge/versão-10.0-22c55e?style=for-the-badge)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=for-the-badge&logo=python&logoColor=white)
-![Paralelismo](https://img.shields.io/badge/paralelismo-ThreadPoolExecutor-f97316?style=for-the-badge)
-![Detector](https://img.shields.io/badge/detector-YOLO%20v8%20ONNX-00b4d8?style=for-the-badge)
-![OCR](https://img.shields.io/badge/OCR-fast--plate--ocr%20CCT-8b5cf6?style=for-the-badge)
-![Status](https://img.shields.io/badge/status-finalizado-22c55e?style=for-the-badge)
+![Paralelismo](https://img.shields.io/badge/Paralelismo-ThreadPoolExecutor-f97316?style=for-the-badge)
+![Detector](https://img.shields.io/badge/Detector-YOLO%20v8%20ONNX-00b4d8?style=for-the-badge)
+![OCR](https://img.shields.io/badge/OCR-fast--plate--ocr-8b5cf6?style=for-the-badge)
+![Status](https://img.shields.io/badge/Status-Finalizado-22c55e?style=for-the-badge)
 
 **Disciplina:** Computação Paralela e Distribuída  
-**Alunos:** Samuel de Souza · Kaio Kevin  
+**Alunos:** Samuel de Souza Rodrigues · Kaio Kevin  
 **Turma:** 5º Semestre — ADS  
 **Professor:** Rafael Marconi  
-**Data:** _(a preencher após execução final)_
-
-</div>
-
----
-
-## 📋 Índice
-
-1. [Descrição do Problema](#1-descrição-do-problema)
-2. [Ambiente Experimental](#2-ambiente-experimental)
-3. [Metodologia de Testes](#3-metodologia-de-testes)
-4. [Resultados Experimentais](#4-resultados-experimentais)
-5. [Cálculo de Speedup e Eficiência](#5-cálculo-de-speedup-e-eficiência)
-6. [Tabela de Resultados](#6-tabela-de-resultados)
-7. [Gráfico de Tempo de Execução](#7-gráfico-de-tempo-de-execução)
-8. [Gráfico de Speedup](#8-gráfico-de-speedup)
-9. [Gráfico de Eficiência](#9-gráfico-de-eficiência)
-10. [Análise dos Resultados](#10-análise-dos-resultados)
-11. [Conclusão](#11-conclusão)
-12. [Como Executar](#12-como-executar)
-13. [Dataset](#13-dataset)
-14. [Estrutura do Projeto](#14-estrutura-do-projeto)
+**Data:** 01/06/2026
 
 ---
 
 ## 1. Descrição do Problema
 
-### 1.1 Qual é o objetivo do programa?
+O projeto implementa um sistema de **reconhecimento automático de placas veiculares** em lote. O programa recebe imagens de veículos, detecta a região da placa com **YOLO v8 em formato ONNX**, recorta a placa detectada e realiza a leitura textual utilizando **fast-plate-ocr**. Em seguida, a placa reconhecida é comparada com uma lista local de veículos roubados.
 
-O programa realiza o **reconhecimento automático de placas veiculares** em lotes de imagens, com suporte a dois modos de execução: **serial** (linha de base) e **paralelo** (com múltiplas threads). O objetivo central do projeto é demonstrar empiricamente a **Lei de Amdahl**, medindo o ganho real de desempenho obtido com a paralelização e comparando-o com o ganho teórico máximo previsto pela lei.
+O objetivo principal da paralelização é diminuir o tempo total de processamento do dataset, distribuindo a etapa de OCR entre múltiplas threads por meio da biblioteca `concurrent.futures.ThreadPoolExecutor`.
 
-Como aplicação prática, o sistema verifica se alguma placa detectada consta em uma lista de **veículos roubados**, gerando relatórios em CSV e HTML com os resultados de cada imagem.
-
-### 1.2 Qual o volume de dados processado?
+### 1.1 Volume de dados processado
 
 | Item | Valor |
-|---|---|
-| Total de imagens | _(a preencher)_ |
-| Formato | PNG / JPEG |
-| Resolução média | variada (câmeras reais) |
-| Placas detectadas | _(a preencher)_ |
-| Taxa de detecção | _(a preencher)_ |
+|---|---:|
+| Total de imagens | 2000 |
+| Imagens com placa | 2000 |
+| Imagens sem placa | 0 |
+| Placas detectadas | 2000 |
+| Taxa de detecção | 100% |
+| Status OK | 2000 |
+| Status ROUBADO | 0 |
+| Não identificado | 0 |
 
-### 1.3 Qual algoritmo foi utilizado?
+### 1.2 Algoritmo utilizado
 
-O sistema implementa um **pipeline de dois estágios** com paralelismo no segundo estágio:
+O sistema utiliza um pipeline em dois estágios:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  PIPELINE TWO-STAGE                                             │
-│                                                                 │
-│  Estágio 1 — SERIAL (processo principal)                        │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  Para cada lote de 8 imagens:                            │   │
-│  │  cv2.imread() → YOLO v8 ONNX → bounding boxes → crops    │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                           │                                     │
-│                    crops em disco                               │
-│                           │                                     │
-│  Estágio 2 — PARALELO (N threads via ThreadPoolExecutor)        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
-│  │  Thread 1    │  │  Thread 2    │  │  Thread N    │           │
-│  │  OCR (CCT)   │  │  OCR (CCT)   │  │  OCR (CCT)   │           │
-│  │  placa → txt │  │  placa → txt │  │  placa → txt │           │
-│  └──────────────┘  └──────────────┘  └──────────────┘           │
-│         └────────────────┴────────────────┘                     │
-│                    resultados                                   │
-└─────────────────────────────────────────────────────────────────┘
+```text
+Entrada: imagens de veículos
+   ↓
+Estágio 1 — Detecção YOLO/ONNX
+   - leitura da imagem
+   - detecção da placa
+   - geração do recorte da placa
+   ↓
+Estágio 2 — OCR com fast-plate-ocr
+   - leitura dos caracteres da placa
+   - normalização do texto
+   - comparação com a lista de veículos roubados
+   ↓
+Saída: CSV, relatório HTML e métricas de desempenho
 ```
 
-**Por que esta arquitetura?**  
-A detecção YOLO é executada em modo *batch* no processo principal porque a biblioteca ONNX Runtime não libera o GIL do Python durante chamadas Python puras. O OCR, por outro lado, usa `InferenceSession.run()` do ONNX Runtime que **libera o GIL durante a inferência**, permitindo paralelismo real entre threads — o que é confirmado empiricamente pelos tempos obtidos.
+No modo serial, cada imagem é processada sequencialmente. No modo paralelo, as placas recortadas são enviadas para múltiplas threads, que executam a etapa de OCR de forma concorrente.
 
-### 1.4 Complexidade aproximada do algoritmo
+### 1.3 Complexidade aproximada
 
-| Componente | Complexidade | Observações |
+Considerando `n` imagens, `p` placas detectadas e `t` threads:
+
+| Componente | Complexidade aproximada | Observação |
 |---|---|---|
-| Detecção YOLO (Estágio 1) | O(n) | Linear no nº de imagens; batch de 8 amortiza overhead |
-| OCR CCT (Estágio 2 — serial) | O(p) | Linear no nº de placas detectadas |
-| OCR CCT (Estágio 2 — paralelo) | O(p/t) | Dividido entre `t` threads |
-| Pipeline completo serial | **O(n)** | Dominado pelo YOLO (~68% do tempo) |
-| Pipeline completo paralelo | **O(n + p/t)** | Gargalo: Estágio 1 (serial) |
-
-A fração serial imposta pelo Estágio 1 (≈ 68% do tempo total) é o principal limitante previsto pela Lei de Amdahl, resultando num speedup máximo teórico de **~1,47×** com 4 threads e **~1,56×** com infinitas threads.
+| Detecção YOLO | O(n) | Processa todas as imagens |
+| OCR serial | O(p) | Uma leitura por placa |
+| OCR paralelo | O(p/t) | Divisão do OCR entre as threads |
+| Pipeline serial | O(n + p) | Execução sequencial |
+| Pipeline paralelo | O(n + p/t) | A etapa de detecção ainda limita parte do ganho |
 
 ---
 
 ## 2. Ambiente Experimental
 
-### 2.1 Hardware e Software
-
 | Item | Descrição |
 |---|---|
-| **Processador** | _(a preencher — ex: Intel Core i5-10400)_ |
-| **Número de núcleos** | _(a preencher — ex: 6 físicos / 12 lógicos)_ |
-| **Memória RAM** | _(a preencher — ex: 16 GB DDR4)_ |
-| **Sistema Operacional** | _(a preencher — ex: Windows 11 64-bit)_ |
-| **Linguagem** | Python 3.10+ |
-| **Biblioteca de paralelização** | `concurrent.futures.ThreadPoolExecutor` (stdlib) |
-| **Versão Python** | _(a preencher — ex: 3.12.3)_ |
-| **Runtime de inferência** | ONNX Runtime 1.18+ |
-
-### 2.2 Bibliotecas principais
-
-| Biblioteca | Versão | Função |
-|---|---|---|
-| `ultralytics` | ≥ 8.0 | Detecção de placas (YOLO v8 → exportado para ONNX) |
-| `onnxruntime` | ≥ 1.18 | Inferência ONNX (libera GIL durante `Run()`) |
-| `fast-plate-ocr` | ≥ 1.1 | OCR — modelo CCT treinado em 65+ países |
-| `opencv-python` | ≥ 4.8 | Leitura e pré-processamento de imagens |
-| `numpy` | ≥ 1.24 | Manipulação de arrays |
+| Processador | 12th Gen Intel(R) Core(TM) i7-12700, 2.10 GHz |
+| Número de núcleos | 12 núcleos físicos / 20 threads lógicas |
+| Memória RAM | 16,0 GB instalada, 15,7 GB utilizável |
+| Sistema Operacional | Windows 11 Pro 64 bits, versão 24H2, compilação 26100.8037 |
+| Linguagem utilizada | Python 3.10+ |
+| Biblioteca de paralelização | `concurrent.futures.ThreadPoolExecutor` |
+| Detector | YOLO v8 exportado para ONNX |
+| OCR | fast-plate-ocr / CCT |
+| Bibliotecas principais | OpenCV, NumPy, Ultralytics, ONNX Runtime, psutil |
 
 ---
 
 ## 3. Metodologia de Testes
 
-### 3.1 Como o tempo foi medido
+O tempo de execução foi medido pelo próprio programa com `time.perf_counter()`. O tempo de **warm-up** foi registrado separadamente, pois corresponde ao carregamento inicial dos modelos de detecção e OCR. Assim, a comparação considera o tempo principal de processamento das imagens.
 
-O tempo de processamento é capturado com `time.perf_counter()` — o relógio de alta resolução do Python. A medição começa **após o warm-up** (carregamento de modelos) e termina quando o último resultado é registrado. O warm-up é cronometrado separadamente e excluído dos resultados, para medir apenas o custo do processamento de imagens.
+As configurações testadas foram:
 
-```python
-t_inicio = time.perf_counter()
-# ... processamento de todas as imagens ...
-t_total = time.perf_counter() - t_inicio
-```
+- 1 thread/processo — execução serial;
+- 2 threads — execução paralela;
+- 4 threads — execução paralela;
+- 8 threads — execução paralela;
+- 12 threads — execução paralela.
 
-Internamente, o sistema também registra separadamente:
-- **`yolo_time_s`**: tempo total gasto no Estágio 1 (detecção YOLO, serial)
-- **`ocr_time_s`**: soma dos tempos de OCR de todas as threads (tempo de CPU, não wall-clock)
+Todas as configurações processaram o mesmo conjunto de **2000 imagens**.
 
-### 3.2 Configurações testadas
+### 3.1 Métricas auxiliares coletadas
 
-| Configuração | Threads | Descrição |
-|---|---|---|
-| Serial | 1 | Baseline — YOLO + OCR sequenciais por imagem |
-| Paralelo 2 | 2 | OCR em 2 threads simultâneas |
-| Paralelo 4 | 4 | OCR em 4 threads (≤ núcleos físicos) |
-| Paralelo 8 | 8 | OCR em 8 threads (= núcleos lógicos) |
-| Paralelo 12 | 12 | OCR em 12 threads (oversubscription) |
+| Threads | Warm-up (s) | YOLO (s) | OCR acumulado (s) | Throughput |
+|---:|---:|---:|---:|---:|
+| 1 | 2.5555 | 241.45 | 48.82 | 5.90 |
+| 2 | 2.4536 | 47.09 | 31.13 | 31.21 |
+| 4 | 2.4532 | 45.80 | 53.36 | 33.23 |
+| 8 | 2.3677 | 44.25 | 167.80 | 30.20 |
+| 12 | 2.6063 | 45.16 | 270.61 | 29.10 |
 
-### 3.3 Procedimento experimental
-
-- Cada configuração foi executada com o **mesmo conjunto de imagens** na mesma ordem
-- Antes de cada bateria de testes, a máquina foi reiniciada e o ambiente virtual reativado para minimizar interferência de cache e processos em background
-- O modelo YOLO já estava em cache ONNX (exportado na primeira execução), eliminando esse custo do tempo medido
-- **Número de execuções por configuração:** _(a preencher — ex: 3 execuções, média)_
-- **Condição da máquina:** sem outros processos pesados em execução
-
-### 3.4 Frações serial e paralela (Amdahl)
-
-Com base nas medições, identificamos empiricamente:
-
-| Fração | Valor | Componente |
-|---|---|---|
-| **f** (serial) | ≈ 0,68 (68%) | Estágio 1 — YOLO em batch |
-| **1 − f** (paralela) | ≈ 0,32 (32%) | Estágio 2 — OCR em threads |
-
-Aplicando a Lei de Amdahl: **Speedup\_máx = 1 / f = 1 / 0,68 ≈ 1,47×**
+> Observação: no modo paralelo, o tempo de OCR exibido no sumário é acumulado entre as threads. Portanto, ele representa a soma do trabalho realizado pelas threads, não necessariamente o tempo total de parede da execução.
 
 ---
 
 ## 4. Resultados Experimentais
 
-> ⚠️ **A preencher após execução final com o dataset completo.**
-
-| Nº Threads | Tempo de Execução (s) |
-|---|---|
-| 1 (serial) | ___ |
-| 2 | ___ |
-| 4 | ___ |
-| 8 | ___ |
-| 12 | ___ |
+| Nº Threads/Processos | Tempo de Execução (s) |
+|---:|---:|
+| 1 | 238.7392 |
+| 2 | 64.0720 |
+| 4 | 60.1929 |
+| 8 | 66.2353 |
+| 12 | 68.7171 |
 
 ---
 
 ## 5. Cálculo de Speedup e Eficiência
 
-### 5.1 Fórmulas utilizadas
+### 5.1 Speedup
 
-**Speedup:**
+```text
+Speedup(p) = T(1) / T(p)
+```
 
-$$S(p) = \frac{T(1)}{T(p)}$$
+Onde:
 
-Onde $T(1)$ é o tempo serial e $T(p)$ o tempo com $p$ threads.
+- `T(1)` = tempo da execução serial;
+- `T(p)` = tempo usando `p` threads/processos.
 
-**Eficiência:**
+### 5.2 Eficiência
 
-$$E(p) = \frac{S(p)}{p}$$
+```text
+Eficiência(p) = Speedup(p) / p
+```
 
-**Lei de Amdahl** — speedup máximo teórico:
+Onde:
 
-$$S_{max} = \frac{1}{f + \frac{1-f}{p}}$$
-
-Onde $f$ é a fração do programa que não pode ser paralelizada.
-
-### 5.2 Speedup teórico máximo (Amdahl, f = 0,68)
-
-| Threads (p) | Speedup teórico máx. |
-|---|---|
-| 1 | 1,00× |
-| 2 | 1,23× |
-| 4 | 1,35× |
-| 8 | 1,43× |
-| 12 | 1,45× |
-| ∞ | 1,47× |
-
-> Os valores reais são esperados abaixo desse teto — verificar após execução.
+- `p` = número de threads/processos.
 
 ---
 
 ## 6. Tabela de Resultados
 
-> ⚠️ **A preencher após execução final.** Use `generate_charts.py` para calcular automaticamente.
+| Threads/Processos | Tempo (s) | Speedup | Eficiência | Throughput | Redução do tempo vs. serial |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 238.7392 | 1.000x | 1.000 (100.0%) | 5.90 img/s | 0.0% |
+| 2 | 64.0720 | 3.726x | 1.863 (186.3%) | 31.21 img/s | 73.2% |
+| 4 | 60.1929 | 3.966x | 0.992 (99.2%) | 33.23 img/s | 74.8% |
+| 8 | 66.2353 | 3.604x | 0.451 (45.1%) | 30.20 img/s | 72.3% |
+| 12 | 68.7171 | 3.474x | 0.290 (29.0%) | 29.10 img/s | 71.2% |
 
-| Threads | Tempo (s) | Speedup | Eficiência |
-|---|---|---|---|
-| 1 | ___ | 1,000 | 1,000 (100%) |
-| 2 | ___ | ___ | ___ |
-| 4 | ___ | ___ | ___ |
-| 8 | ___ | ___ | ___ |
-| 12 | ___ | ___ | ___ |
+A melhor configuração foi obtida com **4 threads**, com tempo de **60.1929 s**, speedup de **3.966x** e redução de **74.8%** em relação ao modo serial.
 
 ---
 
 ## 7. Gráfico de Tempo de Execução
 
-> ⚠️ **Inserir após gerar com `python generate_charts.py`.**
+![Gráfico de Tempo de Execução](graficos/tempo_execucao.jpg)
 
-<!-- Cole aqui a imagem gerada: charts/01_tempo.png -->
-
-![Tempo de Execução](charts/01_tempo.png)
-
-*Eixo X: número de threads · Eixo Y: tempo de execução em segundos*
+O gráfico mostra uma grande redução do tempo ao sair da execução serial para a execução paralela. O menor tempo ocorreu com **4 threads**.
 
 ---
 
 ## 8. Gráfico de Speedup
 
-> ⚠️ **Inserir após gerar com `python generate_charts.py`.**
+![Gráfico de Speedup](graficos/speedup.jpg)
 
-<!-- Cole aqui a imagem gerada: charts/02_speedup.png -->
-
-![Speedup](charts/02_speedup.png)
-
-*Linha pontilhada: speedup ideal (linear) · Linha sólida: speedup real obtido*
+O speedup real aumenta até **4 threads** e depois diminui levemente em 8 e 12 threads, indicando perda de eficiência por overhead e contenção.
 
 ---
 
 ## 9. Gráfico de Eficiência
 
-> ⚠️ **Inserir após gerar com `python generate_charts.py`.**
+![Gráfico de Eficiência](graficos/eficiencia.jpg)
 
-<!-- Cole aqui a imagem gerada: charts/03_eficiencia.png -->
-
-![Eficiência](charts/03_eficiencia.png)
-
-*Barras verdes: eficiência ≥ 80% · Amarelas: 50–80% · Vermelhas: < 50%*
+A eficiência é maior nas configurações com menor número de threads e cai conforme o paralelismo aumenta, especialmente em 8 e 12 threads.
 
 ---
 
 ## 10. Análise dos Resultados
 
-### 10.1 O speedup foi próximo do ideal?
+O speedup obtido não foi linear. Embora o uso de threads tenha reduzido bastante o tempo de execução, o aumento do número de threads não resultou em ganho proporcional. A aplicação apresentou boa escalabilidade inicial, caindo de **238.7392 s** no modo serial para **64.0720 s** com 2 threads e **60.1929 s** com 4 threads.
 
-O speedup linear (ideal) pressupõe que **100% do programa** possa ser paralelizado. No nosso pipeline, o Estágio 1 (detecção YOLO) é **inerentemente serial** — não pode ser dividido entre threads sem grandes penalidades de sincronização e memória. Portanto, o speedup real é estruturalmente limitado a **~1,47×** mesmo com infinitas threads.
+A partir de 8 threads, o desempenho começou a piorar. O tempo subiu para **66.2353 s** com 8 threads e **68.7171 s** com 12 threads. Isso indica que o custo adicional de gerenciamento das threads e a disputa por recursos passaram a reduzir o benefício do paralelismo.
 
-> _(Preencher com análise dos valores reais após execução)_
+A eficiência começou a cair de forma mais evidente após **4 threads**. Com 8 e 12 threads, a eficiência foi de **0.451** e **0.290**, respectivamente.
 
-### 10.2 A aplicação apresentou escalabilidade?
+As principais causas prováveis para a limitação de desempenho são:
 
-_(A preencher — descrever se o tempo continuou caindo conforme o número de threads aumentou, ou se estabilizou/piorou a partir de algum ponto.)_
-
-### 10.3 Em qual ponto a eficiência começou a cair?
-
-Com base na fração paralela de apenas 32%, é esperado que a eficiência caia rapidamente a partir de 4 threads, pois o Estágio 2 (OCR) é concluído muito mais rápido que o Estágio 1 (YOLO), deixando threads ociosas enquanto aguardam o batch seguinte de detecções.
-
-> _(Confirmar com dados reais após execução)_
-
-### 10.4 O número de threads ultrapassou os núcleos físicos?
-
-Sim — as configurações de 8 e 12 threads testam o comportamento com **hyperthreading** e **oversubscription**. Espera-se que acima dos núcleos físicos o ganho adicional seja mínimo ou nulo, pois a disputa pelo mesmo core físico introduz overhead de contexto.
-
-### 10.5 Houve overhead de paralelização?
-
-O principal overhead identificado é o **warm-up do ThreadPoolExecutor**: na primeira execução, o Python cria e inicializa cada thread, o que adiciona latência. Para mitigar esse custo, o sistema mantém o pool ativo durante toda a execução do Estágio 2.
-
-### 10.6 Causas identificadas para limitação de desempenho
-
-| Causa | Impacto | Componente |
-|---|---|---|
-| GIL do Python | Alto | Impede paralelismo real no Estágio 1 |
-| Estágio 1 serial (YOLO) | Alto | Limita speedup máximo a ~1,47× (Amdahl) |
-| ONNX Runtime libera GIL | Positivo | Permite OCR paralelo real no Estágio 2 |
-| I/O de imagens (cv2.imread) | Médio | Bound por disco no carregamento de batch |
-| Hiperthreading (>4 threads) | Baixo | Ganho marginal, possível contenção de cache |
+- overhead de criação e gerenciamento das threads;
+- contenção de memória e cache;
+- concorrência no acesso aos arquivos intermediários;
+- etapa de detecção YOLO ainda parcialmente limitante;
+- aumento do trabalho acumulado de OCR conforme há mais disputa por recursos.
 
 ---
 
 ## 11. Conclusão
 
-### 11.1 O paralelismo trouxe ganho significativo?
+O paralelismo trouxe ganho significativo para o projeto. A melhor configuração foi **4 threads**, reduzindo o tempo de execução de **238.7392 s** para **60.1929 s** e alcançando speedup de **3.966x**.
 
-_(A preencher após execução — indicar o percentual de ganho obtido, ex: "O modo paralelo com 4 threads foi X% mais rápido que o serial.")_
+Apesar do ganho expressivo, o programa não escala indefinidamente com o aumento do número de threads. A partir de 8 threads, o tempo voltou a aumentar, mostrando que há overhead e contenção de recursos.
 
-### 11.2 Qual foi o melhor número de threads?
+Como melhorias futuras, recomenda-se:
 
-_(A preencher — comparar 4, 8 e 12 threads em termos de custo-benefício entre speedup e eficiência.)_
-
-### 11.3 O programa escala bem com mais threads?
-
-A análise teórica pela Lei de Amdahl indica que **não há escala ilimitada**. Com 68% do trabalho sendo serial (YOLO), o teto de speedup é de aproximadamente **1,47×**, independentemente do número de threads adicionadas. Isso é confirmado empiricamente pelo plateau observado a partir de 4–8 threads.
-
-### 11.4 Melhorias possíveis
-
-| Melhoria | Impacto Esperado | Complexidade |
-|---|---|---|
-| Substituir YOLO serial por detector nativo ONNX com batch multithread | Alto | Alta |
-| Pré-carregamento assíncrono de imagens (asyncio + cv2) | Médio | Média |
-| GPU (CUDA via ONNX Runtime) para YOLO | Muito Alto | Alta |
-| ProcessPoolExecutor para múltiplos processos Python | Médio | Alta (memória) |
-| Pipeline assíncrono produtor-consumidor (queue) | Médio | Média |
-
-A maior alavanca de melhoria seria **migrar o Estágio 1 para GPU**, o que transformaria o gargalo serial em paralelo massivo e permitiria speedups de 10× ou mais.
+- usar GPU para acelerar a detecção YOLO;
+- evitar gravações intermediárias em disco, mantendo os crops em memória;
+- usar um pipeline produtor-consumidor com filas;
+- testar `ProcessPoolExecutor` para comparar processos e threads;
+- executar múltiplas rodadas por configuração para calcular média e desvio padrão.
 
 ---
 
 ## 12. Como Executar
 
-### 12.1 Pré-requisitos
+### 12.1 Instalação
 
 ```powershell
-# Windows — PowerShell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-> **Nota:** na primeira execução, o sistema exporta o modelo YOLO para ONNX automaticamente (~45s). Nas execuções seguintes, o cache é reutilizado (~2s).
+### 12.2 Inserir imagens
 
-### 12.2 Colocar imagens
+Copie as imagens para:
 
-Copie os arquivos PNG/JPEG para `data/input/` e execute:
+```text
+data/input/
+```
+
+### 12.3 Execução interativa
 
 ```powershell
 python main.py
 ```
 
-O sistema pergunta o modo de execução e o número de threads.
-
-### 12.3 Modo não-interativo (para benchmarks)
+### 12.4 Execução para benchmark
 
 ```powershell
-# Serial
 python main.py --no-interactive --execution serial
-
-# Parallel com 4 threads
+python main.py --no-interactive --execution parallel --workers 2
 python main.py --no-interactive --execution parallel --workers 4
-```
-
-### 12.4 Cenário de teste — placas roubadas
-
-```powershell
-# Gera 5 placas "roubadas" fictícias a partir das imagens do dataset
-python tools/stolen.py demo 5
-python main.py
+python main.py --no-interactive --execution parallel --workers 8
+python main.py --no-interactive --execution parallel --workers 12
 ```
 
 ---
 
-## 13. Dataset
+## 13. Estrutura do Projeto
 
-As imagens **não são incluídas no clone** do repositório para não aumentar o tamanho do download.
-
-📥 **[Download do dataset (ZIP)](https://github.com/USUARIO/uni-project-stolen-vehicles/releases/latest/download/dataset.zip)**
-
-Após baixar, extraia em `data/input/`. O dataset contém imagens de veículos com placas sintéticas, criadas usando python.
-
-| Item | Detalhe |
-|---|---|
-| Total de imagens | _(a preencher)_ |
-| Formatos | PNG, JPEG |
-| Origem | Kaggle — License Plate Dataset (domínio público) |
-| Países representados | BR, IN, UK, US, EU, e outros |
-
----
-
-## 14. Estrutura do Projeto
-
-```
+```text
 uni-project-stolen-vehicles/
-│
-├── main.py                    ← ponto de entrada
+├── main.py
 ├── requirements.txt
-├── generate_charts.py         ← gerador de gráficos do relatório
-│
-├── src/
-│   ├── config.py              ← parâmetros configuráveis (versão, modelos, paths)
-│   ├── detector.py            ← Estágio 1: YOLO v8 ONNX
-│   ├── ocr.py                 ← Estágio 2: fast-plate-ocr CCT (singleton thread-safe)
-│   ├── pipeline.py            ← workers serial e paralelo
-│   ├── executor.py            ← ThreadPoolExecutor two-stage
-│   ├── report.py              ← geração de CSV
-│   ├── html_report.py         ← relatório visual em HTML
-│   ├── dataset.py             ← listagem de imagens
-│   ├── logger.py              ← logging colorido
-│   ├── colors.py              ← paleta ANSI
-│   └── runtime.py             ← controle de threads do ONNX Runtime
-│
-├── tools/
-│   └── stolen.py              ← gerenciamento da lista de veículos roubados
-│
+├── README.md
 ├── data/
-│   ├── input/                 ← imagens de entrada (não versionado)
-│   ├── output/                ← resultados CSV + HTML (não versionado)
-│   └── stolen_plates.txt      ← lista de placas roubadas
-│
+│   ├── input/
+│   └── output/
+│       ├── crops/
+│       └── preprocessed/
 ├── models/
-│   └── license_plate_detector.onnx   ← gerado automaticamente (não versionado)
-│
-└── charts/                    ← gráficos gerados pelo generate_charts.py
-    ├── 00_painel_completo.png
-    ├── 01_tempo.png
-    ├── 02_speedup.png
-    └── 03_eficiencia.png
+├── src/
+│   ├── colors.py
+│   ├── config.py
+│   ├── dataset.py
+│   ├── detector.py
+│   ├── executor.py
+│   ├── html_report.py
+│   ├── logger.py
+│   ├── ocr.py
+│   ├── pipeline.py
+│   ├── report.py
+│   └── runtime.py
+├── tools/
+│   └── stolen.py
+└── graficos/
+    ├── tempo_execucao.jpg
+    ├── speedup.jpg
+    └── eficiencia.jpg
 ```
 
 ---
 
-<div align="center">
-
-Projeto desenvolvido para a disciplina de **Computação Concorrente e Distribuída**  
-5º Semestre — Análise e Desenvolvimento de Sistemas  
-**Samuel de Souza · Kaio Kevin** — Prof. Rafael Marconi
-
-</div>
-
-
-================================================================
-  SUMÁRIO DE EXECUÇÃO
-================================================================
-  Modo              : SERIAL
-  Workers           : 1
-  Imagens           : 2000
-  Warm-up           : 2.5555 s
-  Tempo total       : 338.7392 s
-  Média por imagem  : 0.1694 s
-  Throughput        : 5.90 img/s
-----------------------------------------------------------------
-  YOLO (detecção)   : 241.45 s  (83.2%)
-  OCR  (leitura)    :  48.82 s  (16.8%)
-----------------------------------------------------------------
-  Com placa         : 2000
-  Sem placa         : 0
-  Status OK         : 2000
-  Status ROUBADO    : 0
-  Não identificado  : 0
-----------------------------------------------------------------
-  results.csv       : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\results.csv
-  performance_log   : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\performance_log.csv
-================================================================
-
-================================================================
-  SUMÁRIO DE EXECUÇÃO
-================================================================
-  Modo              : PARALLEL
-  Workers           : 2
-  Imagens           : 2000
-  Warm-up           : 2.4536 s
-  Tempo total       : 64.0720 s
-  Média por imagem  : 0.0320 s
-  Throughput        : 31.21 img/s
-----------------------------------------------------------------
-  YOLO (detecção)   :  47.09 s  (60.2%)
-  OCR  (leitura)    :  31.13 s  (39.8%)
-----------------------------------------------------------------
-  Com placa         : 2000
-  Sem placa         : 0
-  Status OK         : 2000
-  Status ROUBADO    : 0
-  Não identificado  : 0
-----------------------------------------------------------------
-  results.csv       : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\results.csv
-  performance_log   : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\performance_log.csv
-================================================================
-
-================================================================
-  SUMÁRIO DE EXECUÇÃO
-================================================================
-  Modo              : PARALLEL
-  Workers           : 4
-  Imagens           : 2000
-  Warm-up           : 2.4532 s
-  Tempo total       : 60.1929 s
-  Média por imagem  : 0.0301 s
-  Throughput        : 33.23 img/s
-----------------------------------------------------------------
-  YOLO (detecção)   :  45.80 s  (46.2%)
-  OCR  (leitura)    :  53.36 s  (53.8%)
-----------------------------------------------------------------
-  Com placa         : 2000
-  Sem placa         : 0
-  Status OK         : 2000
-  Status ROUBADO    : 0
-  Não identificado  : 0
-----------------------------------------------------------------
-  results.csv       : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\results.csv
-  performance_log   : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\performance_log.csv
-================================================================
-
-================================================================
-  SUMÁRIO DE EXECUÇÃO
-================================================================
-  Modo              : PARALLEL
-  Workers           : 8
-  Imagens           : 2000
-  Warm-up           : 2.3677 s
-  Tempo total       : 66.2353 s
-  Média por imagem  : 0.0331 s
-  Throughput        : 30.20 img/s
-----------------------------------------------------------------
-  YOLO (detecção)   :  44.25 s  (20.9%)
-  OCR  (leitura)    : 167.80 s  (79.1%)
-----------------------------------------------------------------
-  Com placa         : 2000
-  Sem placa         : 0
-  Status OK         : 2000
-  Status ROUBADO    : 0
-  Não identificado  : 0
-----------------------------------------------------------------
-  results.csv       : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\results.csv
-  performance_log   : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\performance_log.csv
-================================================================
-
-================================================================
-  SUMÁRIO DE EXECUÇÃO
-================================================================
-  Modo              : PARALLEL
-  Workers           : 12
-  Imagens           : 2000
-  Warm-up           : 2.6063 s
-  Tempo total       : 68.7171 s
-  Média por imagem  : 0.0344 s
-  Throughput        : 29.10 img/s
-----------------------------------------------------------------
-  YOLO (detecção)   :  45.16 s  (14.3%)
-  OCR  (leitura)    : 270.61 s  (85.7%)
-----------------------------------------------------------------
-  Com placa         : 2000
-  Sem placa         : 0
-  Status OK         : 2000
-  Status ROUBADO    : 0
-  Não identificado  : 0
-----------------------------------------------------------------
-  results.csv       : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\results.csv
-  performance_log   : C:\Users\aluno\Downloads\uni-project-stolen-vehicles\data\output\performance_log.csv
-================================================================
-
-Processador	            12th Gen Intel(R) Core(TM) i7-12700 (2.10 GHz)
-RAM instalada 	16,0 GB (utilizável: 15,7 GB)
-ID do dispositivo	260660EB-6BE0-47F6-B2E9-43C50EB621A1
-ID do Produto        	00331-10000-00001-AA661
-Tipo de sistema	Sistema operacional de 64 bits, processador baseado em x64
-Caneta e toque	Nenhuma entrada à caneta ou por toque disponível para este vídeo
-Edição	                       Windows 11 Pro
-Versão	                       24H2
-Compilação do SO	26100.8037
-Experiência	           Pacote de Experiência de Recursos do Windows 1000.26100.300.0
+Projeto desenvolvido para a disciplina de **Computação Paralela e Distribuída**.
