@@ -14,6 +14,17 @@
 
 ---
 
+## Dataset
+
+As imagens utilizadas nos testes não são armazenadas diretamente neste repositório para evitar que o clone fique pesado.
+
+📥 [Baixar dataset](https://github.com/samucabsb/uni-project-stolen-vehicles/releases/download/dataset-v1.0/placas-20260601T192527Z-3-001.zip)
+
+Após baixar, extraia o conteúdo para:
+
+```text
+data/input/
+
 ## 1. Descrição do Problema
 
 O projeto implementa um sistema de **reconhecimento automático de placas veiculares** em lote. O programa recebe imagens de veículos, detecta a região da placa com **YOLO v8 em formato ONNX**, recorta a placa detectada e realiza a leitura textual utilizando **fast-plate-ocr**. Em seguida, a placa reconhecida é comparada com uma lista local de veículos roubados.
