@@ -24,6 +24,7 @@ Após baixar, extraia o conteúdo para:
 
 ```text
 data/input/
+```
 
 ## 1. Descrição do Problema
 
