@@ -1,24 +1,36 @@
 """
-Comparador Paralelo de Placas v10.0
+Comparador Paralelo de Placas v10.2
 =====================================
 
 Pipeline YOLO/ONNX (detecção) + fast-plate-ocr/CCT (reconhecimento) com
 comparação contra lista de placas roubadas. Dois modos de execução:
 
-  serial    1 thread, YOLO → OCR sequencial. Baseline para benchmark.
+  serial    1 processo, YOLO → OCR sequencial. Baseline para benchmark.
 
-  parallel  Two-stage com threading:
+  parallel  Two-stage com multiprocessing real:
               Estágio 1: YOLO/ONNX em batch (processo principal)
-              Estágio 2: N threads executam fast-plate-ocr em paralelo
-            Todas as threads compartilham um único modelo ONNX carregado no
-            warmup — sem overhead de inicialização por thread.
+              Estágio 2: N PROCESSOS executam fast-plate-ocr em paralelo
+                         (ProcessPoolExecutor), cada um com sua própria
+                         sessão ONNX fixada em 1 thread interna — sem
+                         disputa entre sessões, escala de forma previsível
+                         com o número de núcleos físicos.
 
-Destaques da v10:
+Destaques da v10.2:
+  • Paralelismo do Estágio 2: threading → multiprocessing (processos reais,
+    sem GIL).
+  • Correção da causa raiz que limitava a escala: ONNX Runtime usa
+    intra_op_num_threads=0 ("auto") por padrão, ignorando as variáveis de
+    ambiente OMP_NUM_THREADS/etc. — cada sessão tentava usar todos os
+    núcleos, gerando disputa entre processos. Corrigido fixando
+    intra_op_num_threads=1 / inter_op_num_threads=1 via SessionOptions
+    explícitas (ver src/ocr.py).
+  • Estágio 2 recebe os crops em memória (array numpy), eliminando a
+    releitura de disco por processo.
   • OCR: RapidOCR → CCT/fast-plate-ocr  (16x mais rápido, sem confusão L↔D)
   • YOLO: PyTorch  → ONNX (exportado automaticamente na 1ª execução, ~2-3x)
   • Speedup de paralelismo limitado pela Lei de Amdahl: com YOLO dominando
-    ~95% do tempo serial, o benefício de N threads é próximo de 1.0x.
-    O ONNX do YOLO reduz essa fração, recuperando parte do speedup.
+    boa parte do tempo serial, o benefício de N processos no Estágio 2 é
+    proporcional à fração de tempo que o OCR representa no total.
 """
 
 # ⚠️  force_single_thread_env() DEVE ser chamada antes de qualquer import de
@@ -65,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--workers", type=int,
-        help="Número de threads para o estágio OCR (modo parallel)",
+        help="Número de processos para o estágio OCR (modo parallel)",
     )
     parser.add_argument(
         "--yolo-model", default=str(DEFAULT_YOLO_MODEL),
@@ -100,7 +112,7 @@ def _ask_choice(question: str, valid: list, default: str) -> str:
 
 def _ask_workers(hw: dict) -> int:
     """
-    Solicita o número de threads com recomendação baseada em hardware.
+    Solicita o número de processos com recomendação baseada em hardware.
 
     Aceita qualquer inteiro >= 1. Valores acima do número de núcleos físicos
     são válidos para coletar dados de benchmark com oversubscription.
@@ -108,7 +120,7 @@ def _ask_workers(hw: dict) -> int:
     recommended = recommend_workers(hw)
     while True:
         answer = input(
-            f"Quantidade de threads [recomendado: {recommended}, qualquer valor aceito]: "
+            f"Quantidade de processos [recomendado: {recommended}, qualquer valor aceito]: "
         ).strip()
         if not answer:
             return recommended
@@ -125,13 +137,13 @@ def _check_ram_warning(hw: dict, workers: int) -> None:
     """
     Emite aviso se a RAM disponível pode ser insuficiente.
 
-    fast-plate-ocr usa um singleton compartilhado (~100 MB), mas cada
-    thread ainda consome RAM para buffers de imagem e overhead (~50-150 MB).
-    Não bloqueia a execução — apenas informa o usuário.
+    A partir da v11, cada processo carrega seu PRÓPRIO YOLO + OCR (não mais
+    um único OCR compartilhado) — footprint maior por processo que nas
+    versões anteriores. Não bloqueia a execução — apenas informa o usuário.
     """
     log        = get_logger()
     avail      = hw["ram_avail_gb"]
-    ram_needed = workers * 0.15   # estimativa conservadora por thread
+    ram_needed = workers * 0.35   # estimativa conservadora: YOLO + OCR por processo
 
     if avail < 0.5:
         log.warning(paint(
@@ -141,7 +153,7 @@ def _check_ram_warning(hw: dict, workers: int) -> None:
         ))
     elif avail < ram_needed:
         log.warning(paint(
-            f"[AVISO] {workers} threads podem precisar de ~{ram_needed:.1f} GB, "
+            f"[AVISO] {workers} processos podem precisar de ~{ram_needed:.1f} GB, "
             f"mas apenas {avail:.1f} GB disponível.",
             C.YELLOW
         ))
@@ -251,7 +263,7 @@ def main() -> int:
         for p in images
     ]
 
-    mode_label = "SERIAL" if execution == "serial" else f"PARALLEL · {workers} threads"
+    mode_label = "SERIAL" if execution == "serial" else f"PARALLEL · {workers} processos"
     print(paint("\n===== EXECUTANDO =====", C.CYAN_BOLD))
     print(f"  Modo      : {paint(mode_label, C.CYAN_BOLD)}")
     print(f"  Imagens   : {len(images)}")
