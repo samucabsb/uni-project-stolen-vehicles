@@ -205,12 +205,13 @@ def process_image_serial(task: dict) -> dict:
 
 
 
-# ── Monkeypatch: ONNX Runtime de thread única para sessões sem sess_options ──
+# ── Monkeypatch: ONNX Runtime com orçamento de threads por worker ────────────
 
-def _patch_onnxruntime_single_thread() -> None:
+def _patch_onnxruntime_threads(n_threads: int = 1) -> None:
     """
     Monkeypatch local ao processo: força toda futura `ort.InferenceSession`
-    criada SEM sess_options explícitas a usar exatamente 1 thread interna.
+    criada SEM sess_options explícitas a usar exatamente `n_threads` threads
+    internas de intra-op (paralelismo dentro de cada operação ONNX).
 
     Por quê: a classe pública `ultralytics.YOLO` não expõe nenhum jeito de
     passar SessionOptions para a sessão ONNX que ela cria internamente —
@@ -218,32 +219,35 @@ def _patch_onnxruntime_single_thread() -> None:
     `onnxruntime.InferenceSession(w, providers=providers)` sem sess_options,
     então o YOLO sempre cai no padrão intra_op_num_threads=0 ("auto" → usa
     todos os núcleos). Sem este patch, rodar N processos cada um com seu
-    próprio YOLO recriaria — para o YOLO, que é bem mais pesado que o OCR —
-    o mesmo bug de oversubscription que corrigimos em ocr.py.
+    próprio YOLO recriaria o bug de oversubscription.
+
+    n_threads é calculado adaptativamente em executor._ort_threads_per_worker:
+      max(1, physical_cores // n_workers)
+    → com 2 workers em 6 físicos: 3 threads cada (6 núcleos ativos)
+    → com 4+ workers: 1 thread cada (sem oversubscription)
 
     O patch só altera o atributo `InferenceSession` no módulo `onnxruntime`
-    DESTE processo (cada processo filho do ProcessPoolExecutor importa sua
-    própria cópia do módulo) — não tem efeito no processo principal nem no
-    modo serial, que não chamam esta função.
+    DESTE processo (cada processo filho importa sua própria cópia do módulo)
+    — não tem efeito no processo principal nem no modo serial.
     """
     import onnxruntime as ort
 
-    if getattr(ort.InferenceSession, "_single_thread_patched", False):
-        return  # já aplicado neste processo
+    if getattr(ort.InferenceSession, "_ort_thread_patch_n", None) == n_threads:
+        return  # já aplicado com este mesmo valor neste processo
 
     _Original = ort.InferenceSession
 
-    class _SingleThreadInferenceSession(_Original):
+    class _LimitedThreadInferenceSession(_Original):
         def __init__(self, path_or_bytes, sess_options=None, **kwargs):
             if sess_options is None:
                 sess_options = ort.SessionOptions()
-                sess_options.intra_op_num_threads = 1
+                sess_options.intra_op_num_threads = n_threads
                 sess_options.inter_op_num_threads = 1
                 sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
             super().__init__(path_or_bytes, sess_options=sess_options, **kwargs)
 
-    _SingleThreadInferenceSession._single_thread_patched = True
-    ort.InferenceSession = _SingleThreadInferenceSession
+    _LimitedThreadInferenceSession._ort_thread_patch_n = n_threads
+    ort.InferenceSession = _LimitedThreadInferenceSession
 
 
 # ── Worker do modo PARALLEL v11: pipeline completo por processo ──────────────
@@ -267,6 +271,7 @@ def init_full_pipeline_process(
     save_images: bool = True, ready_barrier=None,
     yolo_batch_size: int | None = None,
     affinity_list: list | None = None, worker_index_counter=None,
+    ort_threads: int = 1,
 ) -> None:
     """
     Initializer do ProcessPoolExecutor no modo parallel v11 — roda UMA VEZ
@@ -313,6 +318,13 @@ def init_full_pipeline_process(
     Best-effort: se falhar (plataforma sem suporte, permissão), é
     ignorado silenciosamente — não deve derrubar o processo.
 
+    ort_threads controla quantas threads intra-op o ORT usa em CADA sessão
+    ONNX criada neste processo (YOLO e OCR). Calculado pelo executor como
+    max(1, physical_cores // n_workers): com poucos workers, cada um recebe
+    mais threads ORT para usar os núcleos que ficariam ociosos; com muitos
+    workers, permanece em 1 para evitar oversubscription. Propaga também para
+    cv2 (decode JPEG) e torch.
+
     ready_barrier, se fornecido, é um `ctx.Barrier(n_workers + 1)` —
     chamado ao FINAL desta função, depois que os modelos já foram
     carregados e aquecidos, para sinalizar ao processo pai que este
@@ -336,7 +348,21 @@ def init_full_pipeline_process(
             pass
 
     init_runtime()
-    _patch_onnxruntime_single_thread()
+    _patch_onnxruntime_threads(ort_threads)
+
+    # Propaga o orçamento de threads para cv2 (decode JPEG) e torch (ops CPU),
+    # sobrescrevendo o limite fixo de 1 que init_runtime() / force_single_thread_env()
+    # aplicaram — agora usamos exatamente ort_threads por worker.
+    try:
+        import cv2
+        cv2.setNumThreads(ort_threads)
+    except Exception:
+        pass
+    try:
+        import torch
+        torch.set_num_threads(ort_threads)
+    except (ImportError, RuntimeError):
+        pass
 
     from ultralytics import YOLO
     _fp_yolo          = YOLO(yolo_model_path)
@@ -356,6 +382,12 @@ def init_full_pipeline_process(
         ready_barrier.wait()
 
 
+def _imread_batch(paths: list) -> list:
+    """Lê uma lista de imagens via cv2 — chamado em thread de I/O (prefetch)."""
+    import cv2
+    return [cv2.imread(p) for p in paths]
+
+
 def process_image_batch(tasks: list) -> list:
     """
     Processa um LOTE de imagens do início ao fim (YOLO → crop → OCR), dentro
@@ -366,16 +398,16 @@ def process_image_batch(tasks: list) -> list:
     remontar `all_results` no índice global correto, sem precisar embutir
     índice em cada item.
 
-    O YOLO ainda roda em mini-lotes internos (tamanho em _fp_yolo_batch,
-    definido por init_full_pipeline_process — ver lá o porquê de ser
-    adaptativo ao nº de workers) para preservar o ganho de inferência em
-    batch do ONNX Runtime — mesmo com intra_op_num_threads=1, agrupar
-    chamadas reduz overhead fixo por chamada Python/ONNX.
+    YOLO roda em mini-lotes internos (tamanho _fp_yolo_batch) para amortizar
+    o overhead fixo de chamada Python/ONNX. O carregamento das imagens do
+    próximo mini-lote é feito em uma thread de I/O em background enquanto o
+    YOLO processa o mini-lote atual (prefetch) — elimina a espera de disco do
+    caminho crítico para todos os mini-lotes exceto o último.
 
-    Cada task esperado: {"image_path": str, "stolen_plates": set} (mesmo
-    formato já usado em toda a base de código).
+    Cada task esperado: {"image_path": str, "stolen_plates": set}.
     """
     import cv2
+    import concurrent.futures
     from src.config import (
         CROPS_DIR, PREPROCESSED_DIR, WORD_BLACKLIST,
         STATUS_OK, STATUS_STOLEN,
@@ -385,82 +417,99 @@ def process_image_batch(tasks: list) -> list:
 
     results: list = []
 
-    for batch_start in range(0, len(tasks), _fp_yolo_batch):
-        batch = tasks[batch_start: batch_start + _fp_yolo_batch]
+    # Divide as tasks em mini-lotes fixos para controle de memória
+    mini_batches = [
+        tasks[s: s + _fp_yolo_batch]
+        for s in range(0, len(tasks), _fp_yolo_batch)
+    ]
+    if not mini_batches:
+        return results
 
-        t_yolo_batch = time.perf_counter()
-        images = [cv2.imread(t["image_path"]) for t in batch]
-        loaded = [img is not None for img in images]
-        valid_imgs = [img for img, ok in zip(images, loaded) if ok]
-
-        valid_dets: list = []
-        if valid_imgs:
-            try:
-                valid_dets = _fp_yolo(valid_imgs, verbose=False)
-            except Exception:
-                valid_dets = [None] * len(valid_imgs)
-        # Tempo de YOLO do lote dividido igualmente entre as imagens do lote
-        # (mesma convenção usada no antigo Estágio 1: custo de batch
-        # amortizado, não medido imagem a imagem).
-        yolo_per_image = (
-            (time.perf_counter() - t_yolo_batch) / len(batch) if batch else 0.0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as io_pool:
+        # Pré-carrega o primeiro mini-lote enquanto ainda não há nada para processar
+        next_images_fut = io_pool.submit(
+            _imread_batch, [t["image_path"] for t in mini_batches[0]]
         )
-        det_iter = iter(valid_dets)
 
-        for task, img, ok in zip(batch, images, loaded):
-            stem   = Path(task["image_path"]).stem
-            result = _new_result(Path(task["image_path"]).name)
-            result["yolo_time_s"] = round(yolo_per_image, 6)
+        for batch_idx, batch in enumerate(mini_batches):
+            # Obtém as imagens do mini-lote atual (já carregadas em background)
+            images = next_images_fut.result()
 
-            if not ok:
-                result["error"]        = "Não foi possível carregar a imagem."
-                result["total_time_s"] = result["yolo_time_s"]
-                results.append(result)
-                continue
-
-            det  = next(det_iter, None)
-            crop = extract_best_crop(img, [det]) if det is not None else None
-
-            if crop is None:
-                result["total_time_s"] = result["yolo_time_s"]
-                results.append(result)
-                continue
-
-            result["plate_detected"] = True
-
-            # Pulado em benchmark puro (_fp_save_images=False) — evita tanto o
-            # I/O (2 JPEGs por imagem, N processos escrevendo ao mesmo tempo)
-            # quanto o custo de CPU do CLAHE/Otsu, que só serve para gerar o
-            # arquivo exibido no relatório HTML (não é usado pelo OCR).
-            if _fp_save_images:
-                crop_path = CROPS_DIR        / f"{stem}_crop.jpg"
-                prep_path = PREPROCESSED_DIR / f"{stem}_prep.jpg"
-                cv2.imwrite(str(crop_path), crop)
-                cv2.imwrite(str(prep_path), preprocess_plate(crop))
-                result["crop_path"]         = str(crop_path)
-                result["preprocessed_path"] = str(prep_path)
-
-            t_ocr = time.perf_counter()
-            try:
-                plate_text, confidence = read_plate_text(
-                    _fp_ocr, crop, None, WORD_BLACKLIST
-                )
-            except Exception as exc:
-                result["error"]        = f"OCR: {exc}"
-                result["total_time_s"] = result["yolo_time_s"]
-                results.append(result)
-                continue
-            ocr_elapsed = round(time.perf_counter() - t_ocr, 6)
-
-            result["ocr_time_s"]     = ocr_elapsed
-            result["plate_text"]     = plate_text
-            result["ocr_confidence"] = round(confidence, 4)
-            if plate_text:
-                result["status"] = (
-                    STATUS_STOLEN if plate_text in _fp_stolen_plates else STATUS_OK
+            # Inicia imediatamente o carregamento do próximo mini-lote
+            # (roda em paralelo ao YOLO + OCR do lote atual)
+            if batch_idx + 1 < len(mini_batches):
+                next_images_fut = io_pool.submit(
+                    _imread_batch, [t["image_path"] for t in mini_batches[batch_idx + 1]]
                 )
 
-            result["total_time_s"] = round(result["yolo_time_s"] + ocr_elapsed, 6)
-            results.append(result)
+            t_yolo_batch = time.perf_counter()
+            loaded    = [img is not None for img in images]
+            valid_imgs = [img for img, ok in zip(images, loaded) if ok]
+
+            valid_dets: list = []
+            if valid_imgs:
+                try:
+                    valid_dets = _fp_yolo(valid_imgs, verbose=False)
+                except Exception:
+                    valid_dets = [None] * len(valid_imgs)
+            # Tempo de YOLO do lote dividido igualmente entre as imagens
+            yolo_per_image = (
+                (time.perf_counter() - t_yolo_batch) / len(batch) if batch else 0.0
+            )
+            det_iter = iter(valid_dets)
+
+            for task, img, ok in zip(batch, images, loaded):
+                stem   = Path(task["image_path"]).stem
+                result = _new_result(Path(task["image_path"]).name)
+                result["yolo_time_s"] = round(yolo_per_image, 6)
+
+                if not ok:
+                    result["error"]        = "Não foi possível carregar a imagem."
+                    result["total_time_s"] = result["yolo_time_s"]
+                    results.append(result)
+                    continue
+
+                det  = next(det_iter, None)
+                crop = extract_best_crop(img, [det]) if det is not None else None
+
+                if crop is None:
+                    result["total_time_s"] = result["yolo_time_s"]
+                    results.append(result)
+                    continue
+
+                result["plate_detected"] = True
+
+                # Pulado em benchmark puro — evita I/O e custo de CPU do
+                # CLAHE/Otsu que só serve para gerar o arquivo no relatório HTML.
+                if _fp_save_images:
+                    crop_path = CROPS_DIR        / f"{stem}_crop.jpg"
+                    prep_path = PREPROCESSED_DIR / f"{stem}_prep.jpg"
+                    cv2.imwrite(str(crop_path), crop)
+                    cv2.imwrite(str(prep_path), preprocess_plate(crop))
+                    result["crop_path"]         = str(crop_path)
+                    result["preprocessed_path"] = str(prep_path)
+
+                t_ocr = time.perf_counter()
+                try:
+                    plate_text, confidence = read_plate_text(
+                        _fp_ocr, crop, None, WORD_BLACKLIST
+                    )
+                except Exception as exc:
+                    result["error"]        = f"OCR: {exc}"
+                    result["total_time_s"] = result["yolo_time_s"]
+                    results.append(result)
+                    continue
+                ocr_elapsed = round(time.perf_counter() - t_ocr, 6)
+
+                result["ocr_time_s"]     = ocr_elapsed
+                result["plate_text"]     = plate_text
+                result["ocr_confidence"] = round(confidence, 4)
+                if plate_text:
+                    result["status"] = (
+                        STATUS_STOLEN if plate_text in _fp_stolen_plates else STATUS_OK
+                    )
+
+                result["total_time_s"] = round(result["yolo_time_s"] + ocr_elapsed, 6)
+                results.append(result)
 
     return results

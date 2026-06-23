@@ -358,10 +358,11 @@ def _run_parallel(
     yolo_total_time = 0.0
     ocr_total_time  = 0.0
 
-    ctx        = mp.get_context("spawn")
-    chunks     = _chunk_list(tasks, n_workers)
-    barrier    = ctx.Barrier(n_workers + 1)   # +1 = processo pai (ver _warmup_pool)
-    yolo_batch = _effective_yolo_batch_size(n_workers)
+    ctx         = mp.get_context("spawn")
+    chunks      = _chunk_list(tasks, n_workers)
+    barrier     = ctx.Barrier(n_workers + 1)   # +1 = processo pai (ver _warmup_pool)
+    yolo_batch  = _effective_yolo_batch_size(n_workers)
+    ort_threads = _ort_threads_per_worker(n_workers)
 
     affinity_list, worker_index_counter = None, None
     if pin_cpu:
@@ -375,7 +376,7 @@ def _run_parallel(
         initializer=init_full_pipeline_process,
         initargs=(
             yolo_model, stolen_plates, save_images, barrier, yolo_batch,
-            affinity_list, worker_index_counter,
+            affinity_list, worker_index_counter, ort_threads,
         ),
     ) as pool:
         t_warmup = time.perf_counter()
@@ -392,6 +393,7 @@ def _run_parallel(
             f"  ·  lote YOLO/processo: {yolo_batch}"
             + (f" (reduzido de {YOLO_BATCH_SIZE} p/ limitar pico de memória)"
                if yolo_batch < YOLO_BATCH_SIZE else "")
+            + f"  ·  ORT threads/processo: {ort_threads}"
             + affinity_note,
             C.GRAY
         ))
@@ -529,38 +531,84 @@ def _read_cpu_freq_mhz() -> float | None:
 
 def _compute_cpu_affinity(n_workers: int) -> list | None:
     """
-    Escolhe a quais núcleos lógicos fixar cada um dos n_workers processos
-    (ver pipeline.init_full_pipeline_process). Retorna None se afinidade
-    não fizer sentido (não suportado na plataforma, ou pedindo mais
-    workers do que núcleos lógicos — nesse caso é melhor deixar o SO
-    decidir livremente).
+    Escolhe a quais núcleos lógicos fixar cada um dos n_workers processos.
+    Retorna None quando pinning não ajuda ou ativamente piora (ver abaixo).
 
-    ESTRATÉGIA: espalha os workers pelo intervalo COMPLETO de núcleos
-    lógicos (`round(i * logical / n_workers)`) em vez de pegar os
-    primeiros N em sequência (0, 1, 2, ...). Isso importa porque, em CPUs
-    com hyperthreading, o Windows tipicamente numera as 2 threads de UM
-    mesmo núcleo físico com índices ADJACENTES (0 e 1 = mesmo core, 2 e 3
-    = próximo core, etc.) — pedir núcleos 0,1,2,3 para 4 workers arrisca
-    colocar pares de processos no MESMO núcleo físico (competindo pelas
-    mesmas unidades de execução, bem pior que núcleos distintos).
-    Espalhar pelo intervalo completo (ex.: 0, 5, 10, 15 de 20 núcleos)
-    reduz drasticamente essa chance, sem precisar conhecer a topologia
-    exata P-core/E-core da CPU (não exposta de forma simples pelo SO).
+    Pinning só é aplicado quando n_workers < physical_cores:
+      Coloca cada worker no primeiro thread lógico de um core físico distinto.
+      No layout Intel (phys_k = logical k e logical k+physical), [0..n-1]
+      são todos em cores físicos diferentes — evita que 2 workers compartilhem
+      L1/L2 via HT.
+      Ex.: 4 workers, 6 físicos/12 lógicos → [0, 1, 2, 3] (cores 0-3 ✓)
+      Ex.: 2 workers, 4 físicos/8 lógicos  → [0, 1]       (cores 0-1 ✓)
 
-    Não tenta evitar núcleos E-core especificamente (não há como
-    distingui-los de forma portátil) — só reduz a chance de colisão de
-    hyperthreading via espalhamento.
+    Sem pinning (None) quando n_workers >= physical_cores:
+      n_workers == physical: cada worker ficaria travado em 1 único lógico,
+        mas o processo agora tem 3 threads nativas (Python main, ORT intra-op,
+        io_pool prefetch) disputando esse 1 lógico — overhead de context-switch
+        degrada ~12 % vs deixar o SO distribuir livremente.
+      n_workers > physical: já em hyperthreading; sem mapa perfeito de topology
+        portátil no Windows, o SO faz melhor que qualquer heurística estática.
     """
     try:
         import psutil
-        logical = psutil.cpu_count(logical=True) or 0
+        logical  = psutil.cpu_count(logical=True)  or 0
+        physical = psutil.cpu_count(logical=False) or 0
     except Exception:
         return None
 
-    if logical <= 0 or n_workers <= 0 or n_workers > logical:
+    if logical <= 0 or physical <= 0 or n_workers <= 0 or n_workers > logical:
         return None
 
-    return [round(i * logical / n_workers) % logical for i in range(n_workers)]
+    if n_workers >= physical:
+        # Caso n_workers == physical: cada worker ficaria preso em 1 único
+        # núcleo lógico, mas o worker agora tem 3 threads nativas (Python main,
+        # ORT intra-op, io_pool prefetch) — todas disputando esse 1 lógico.
+        # O overhead de context-switch degrada ~12% vs deixar o SO decidir
+        # livremente entre os N lógicos disponíveis.
+        #
+        # Caso n_workers > physical: já estamos em hyperthreading; espalhar
+        # pelos lógicos é melhor que concentrar, mas o SO costuma fazer isso
+        # bem por conta própria.
+        #
+        # Em ambos os casos: sem pinning = melhor.
+        return None
+
+    # n_workers < physical: cada worker vai para um core físico distinto.
+    # No layout Intel (sibling = logical_idx + physical), [0..n_workers-1]
+    # são os primeiros threads de n_workers cores físicos distintos.
+    # Evita que 2 workers compartilhem L1/L2 via HT.
+    return list(range(n_workers))
+
+
+def _ort_threads_per_worker(n_workers: int) -> int:
+    """
+    Threads ORT intra-op por processo worker.
+
+    Fórmula: max(1, physical_cores // n_workers)
+
+    Com poucos workers, cada um recebe mais threads ORT para preencher os
+    núcleos que ficariam ociosos com o esquema "1 thread por processo":
+      2 workers em 6 físicos → 3 threads cada  (6 núcleos ativos)
+      4 workers em 6 físicos → 1 thread cada   (4 núcleos ativos)
+      6 workers em 6 físicos → 1 thread cada   (6 núcleos ativos)
+      8+ workers             → 1 thread cada   (sem oversubscription)
+
+    Por que não simplesmente "1 thread sempre"?
+    Com 2 workers × 1 thread ORT = apenas 2 dos 6 núcleos físicos ativos.
+    O serial usa mais threads ORT por padrão (ORT ignora OMP_NUM_THREADS em
+    versões recentes) e por isso roda a ~42 ms/img YOLO, enquanto o worker
+    paralelo com 1 thread roda a ~60 ms/img — o worker é mais lento POR
+    IMAGEM que o serial, ganhando apenas por haver 2 rodando ao mesmo tempo.
+    Dar 3 threads a cada worker com n_workers=2 usa todos os 6 físicos e
+    reduz a latência por inferência de ~60 ms → ~35 ms: speedup real ~3×.
+    """
+    try:
+        import psutil
+        physical = psutil.cpu_count(logical=False) or 1
+    except Exception:
+        physical = mp.cpu_count()
+    return max(1, physical // max(1, n_workers))
 
 
 def _effective_yolo_batch_size(n_workers: int) -> int:
