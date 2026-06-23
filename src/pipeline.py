@@ -48,6 +48,7 @@ import time
 from pathlib import Path
 
 from src.runtime import force_single_thread_env, apply_library_thread_limits
+from src.config import YOLO_BATCH_SIZE as _FULL_PIPELINE_YOLO_BATCH
 from src.logger import get_logger
 
 
@@ -89,23 +90,29 @@ def _new_result(image_name: str) -> dict:
 
 # ── Worker SERIAL ─────────────────────────────────────────────────────────────
 
-_serial_yolo = None
-_serial_ocr  = None
+_serial_yolo        = None
+_serial_ocr         = None
+_serial_save_images = True
 
 
-def init_serial_worker(yolo_model_path: str) -> None:
+def init_serial_worker(yolo_model_path: str, save_images: bool = True) -> None:
     """
     Carrega YOLO e OCR no processo principal para execução serial.
 
     Deve ser chamado uma vez antes de process_image_serial().
     O motor OCR reutiliza o singleton já aquecido pelo warmup_ocr().
+
+    save_images=False pula a gravação de crop/preprocessed em disco (e o
+    pré-processamento que só existe para gerar esse arquivo) — útil para
+    isolar o custo de CPU (YOLO+OCR) do custo de I/O em benchmarks.
     """
-    global _serial_yolo, _serial_ocr
+    global _serial_yolo, _serial_ocr, _serial_save_images
     init_runtime()
 
     from ultralytics import YOLO
-    _serial_yolo = YOLO(yolo_model_path)
-    _serial_ocr  = _get_ocr_engine()
+    _serial_yolo        = YOLO(yolo_model_path)
+    _serial_ocr         = _get_ocr_engine()
+    _serial_save_images = save_images
 
 
 def process_image_serial(task: dict) -> dict:
@@ -160,16 +167,21 @@ def process_image_serial(task: dict) -> dict:
         result["total_time_s"] = round(time.perf_counter() - t0, 6)
         return result
 
-    # Salva crop e versão preprocessada em disco
     result["plate_detected"] = True
-    crop_path = CROPS_DIR / f"{stem}_crop.jpg"
-    cv2.imwrite(str(crop_path), crop)
-    result["crop_path"] = str(crop_path)
 
-    preprocessed = preprocess_plate(crop)
-    prep_path = PREPROCESSED_DIR / f"{stem}_prep.jpg"
-    cv2.imwrite(str(prep_path), preprocessed)
-    result["preprocessed_path"] = str(prep_path)
+    # Salva crop e versão preprocessada em disco (pulado em benchmark puro —
+    # save_images=False evita tanto o I/O quanto o custo de CPU do CLAHE/Otsu,
+    # já que `preprocessed` não é usado pelo motor OCR, só para exibição).
+    preprocessed = None
+    if _serial_save_images:
+        crop_path = CROPS_DIR / f"{stem}_crop.jpg"
+        cv2.imwrite(str(crop_path), crop)
+        result["crop_path"] = str(crop_path)
+
+        preprocessed = preprocess_plate(crop)
+        prep_path = PREPROCESSED_DIR / f"{stem}_prep.jpg"
+        cv2.imwrite(str(prep_path), preprocessed)
+        result["preprocessed_path"] = str(prep_path)
 
     # Estágio 2 — OCR
     t_ocr = time.perf_counter()
@@ -246,11 +258,16 @@ def _patch_onnxruntime_single_thread() -> None:
 _fp_yolo          = None
 _fp_ocr           = None
 _fp_stolen_plates = None
+_fp_save_images   = True
+_fp_yolo_batch    = _FULL_PIPELINE_YOLO_BATCH
 
-_FULL_PIPELINE_YOLO_BATCH = 8  # mesmo valor usado no antigo Estágio 1
 
-
-def init_full_pipeline_process(yolo_model_path: str, stolen_plates: frozenset) -> None:
+def init_full_pipeline_process(
+    yolo_model_path: str, stolen_plates: frozenset,
+    save_images: bool = True, ready_barrier=None,
+    yolo_batch_size: int | None = None,
+    affinity_list: list | None = None, worker_index_counter=None,
+) -> None:
     """
     Initializer do ProcessPoolExecutor no modo parallel v11 — roda UMA VEZ
     em cada processo filho, antes de qualquer tarefa.
@@ -260,9 +277,63 @@ def init_full_pipeline_process(yolo_model_path: str, stolen_plates: frozenset) -
     _patch_onnxruntime_single_thread, OCR via sess_options em ocr.py) —
     necessário para que N processos usem N núcleos de forma limpa, sem cada
     sessão tentar usar todos os núcleos sozinha.
+
+    save_images=False pula a gravação de crop/preprocessed em disco em
+    process_image_batch — com N processos escrevendo 2 JPEGs por imagem
+    simultaneamente, isso é uma fonte real de contenção de I/O que cresce
+    com o nº de workers (ver config.SAVE_INTERMEDIATE_IMAGES).
+
+    yolo_batch_size, se fornecido, sobrescreve config.YOLO_BATCH_SIZE para
+    ESTE processo — computado em executor._effective_yolo_batch_size em
+    função do nº de workers, para que o nº de imagens decodificadas em
+    memória simultaneamente em TODO o sistema (lote × nº de processos)
+    fique limitado independente de quantos workers forem pedidos (ver
+    config.MAX_TOTAL_INFLIGHT_IMAGES). Sem isso, pedir muitos workers com
+    um lote grande multiplica o pico de memória e pode derrubar processos
+    por falta de RAM — e um processo morto quebra o ProcessPoolExecutor
+    inteiro, corrompendo o restante do run com erros em cascata.
+
+    affinity_list + worker_index_counter, se fornecidos, fixam ESTE
+    processo em UM núcleo lógico via psutil — sem isso, o agendador do
+    Windows é livre para migrar o processo entre núcleos durante a
+    execução (invalidando cache a cada migração) ou para colocar 2
+    processos no mesmo núcleo físico (2 threads de hyperthreading do
+    mesmo core competem pelas MESMAS unidades de execução — bem pior que
+    núcleos físicos distintos). Ver executor._compute_cpu_affinity para
+    como os núcleos da lista são escolhidos.
+
+    Por que um contador compartilhado e não passar o núcleo já escolhido
+    diretamente? `initargs` do ProcessPoolExecutor é IDÊNTICO para todos
+    os processos — não há como passar "este é o processo nº 2" via
+    initargs sozinho. O contador (multiprocessing.Value com lock) permite
+    que cada processo, ao inicializar, reivindique atomicamente o PRÓXIMO
+    índice disponível em affinity_list — não importa a ordem real de
+    spawn/boot de cada processo.
+
+    Best-effort: se falhar (plataforma sem suporte, permissão), é
+    ignorado silenciosamente — não deve derrubar o processo.
+
+    ready_barrier, se fornecido, é um `ctx.Barrier(n_workers + 1)` —
+    chamado ao FINAL desta função, depois que os modelos já foram
+    carregados e aquecidos, para sinalizar ao processo pai que este
+    processo está 100% pronto (ver executor._warmup_pool). Só pode chegar
+    aqui via `initargs` (pickling de "inheritance", igual a passar um Lock
+    para `Process(args=...)`) — um Barrier NÃO pode ser enviado depois,
+    via `pool.submit()`, pois o processo já não está mais em bootstrap.
     """
-    global _fp_yolo, _fp_ocr, _fp_stolen_plates
+    global _fp_yolo, _fp_ocr, _fp_stolen_plates, _fp_save_images, _fp_yolo_batch
     import numpy as np
+
+    if affinity_list and worker_index_counter is not None:
+        try:
+            with worker_index_counter.get_lock():
+                idx = worker_index_counter.value
+                worker_index_counter.value += 1
+            if idx < len(affinity_list):
+                import psutil
+                psutil.Process().cpu_affinity([affinity_list[idx]])
+        except Exception:
+            pass
 
     init_runtime()
     _patch_onnxruntime_single_thread()
@@ -271,12 +342,18 @@ def init_full_pipeline_process(yolo_model_path: str, stolen_plates: frozenset) -
     _fp_yolo          = YOLO(yolo_model_path)
     _fp_ocr           = _get_ocr_engine()
     _fp_stolen_plates = stolen_plates
+    _fp_save_images   = save_images
+    if yolo_batch_size is not None:
+        _fp_yolo_batch = max(1, yolo_batch_size)
 
     # Aquece os dois modelos neste processo — evita que a 1ª imagem real
     # pague o custo de cold-start tanto do YOLO quanto do OCR.
     dummy = np.zeros((64, 64, 3), dtype=np.uint8)
     _fp_yolo(dummy, verbose=False)
     _fp_ocr.run(np.zeros((64, 256, 3), dtype=np.uint8))
+
+    if ready_barrier is not None:
+        ready_barrier.wait()
 
 
 def process_image_batch(tasks: list) -> list:
@@ -289,10 +366,11 @@ def process_image_batch(tasks: list) -> list:
     remontar `all_results` no índice global correto, sem precisar embutir
     índice em cada item.
 
-    O YOLO ainda roda em mini-lotes internos (_FULL_PIPELINE_YOLO_BATCH)
-    para preservar o ganho de inferência em batch do ONNX Runtime — mesmo
-    com intra_op_num_threads=1, agrupar chamadas reduz overhead fixo por
-    chamada Python/ONNX.
+    O YOLO ainda roda em mini-lotes internos (tamanho em _fp_yolo_batch,
+    definido por init_full_pipeline_process — ver lá o porquê de ser
+    adaptativo ao nº de workers) para preservar o ganho de inferência em
+    batch do ONNX Runtime — mesmo com intra_op_num_threads=1, agrupar
+    chamadas reduz overhead fixo por chamada Python/ONNX.
 
     Cada task esperado: {"image_path": str, "stolen_plates": set} (mesmo
     formato já usado em toda a base de código).
@@ -307,8 +385,8 @@ def process_image_batch(tasks: list) -> list:
 
     results: list = []
 
-    for batch_start in range(0, len(tasks), _FULL_PIPELINE_YOLO_BATCH):
-        batch = tasks[batch_start: batch_start + _FULL_PIPELINE_YOLO_BATCH]
+    for batch_start in range(0, len(tasks), _fp_yolo_batch):
+        batch = tasks[batch_start: batch_start + _fp_yolo_batch]
 
         t_yolo_batch = time.perf_counter()
         images = [cv2.imread(t["image_path"]) for t in batch]
@@ -349,12 +427,18 @@ def process_image_batch(tasks: list) -> list:
                 continue
 
             result["plate_detected"] = True
-            crop_path = CROPS_DIR        / f"{stem}_crop.jpg"
-            prep_path = PREPROCESSED_DIR / f"{stem}_prep.jpg"
-            cv2.imwrite(str(crop_path), crop)
-            cv2.imwrite(str(prep_path), preprocess_plate(crop))
-            result["crop_path"]         = str(crop_path)
-            result["preprocessed_path"] = str(prep_path)
+
+            # Pulado em benchmark puro (_fp_save_images=False) — evita tanto o
+            # I/O (2 JPEGs por imagem, N processos escrevendo ao mesmo tempo)
+            # quanto o custo de CPU do CLAHE/Otsu, que só serve para gerar o
+            # arquivo exibido no relatório HTML (não é usado pelo OCR).
+            if _fp_save_images:
+                crop_path = CROPS_DIR        / f"{stem}_crop.jpg"
+                prep_path = PREPROCESSED_DIR / f"{stem}_prep.jpg"
+                cv2.imwrite(str(crop_path), crop)
+                cv2.imwrite(str(prep_path), preprocess_plate(crop))
+                result["crop_path"]         = str(crop_path)
+                result["preprocessed_path"] = str(prep_path)
 
             t_ocr = time.perf_counter()
             try:

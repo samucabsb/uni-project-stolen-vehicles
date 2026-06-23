@@ -50,12 +50,12 @@ from src.pipeline import (
 from src.colors import C, paint
 from src.config import (
     STATUS_OK, STATUS_STOLEN, STATUS_UNIDENTIFIED, STATUS_ERROR,
-    CROPS_DIR, PREPROCESSED_DIR,
+    CROPS_DIR, PREPROCESSED_DIR, CHUNK_TARGET_IMAGES,
+    YOLO_BATCH_SIZE, MAX_TOTAL_INFLIGHT_IMAGES,
 )
 from src.logger import get_logger
 
 
-_YOLO_BATCH_SIZE  = 8
 _IMAGE_NAME_WIDTH = 40
 _BAR_WIDTH        = 20
 _LINE_WIDTH       = 95   # largura para sobrescrever a barra via \r
@@ -108,21 +108,28 @@ def print_hardware_info() -> None:
 
 # ── Recomendação de workers ───────────────────────────────────────────────────
 
+_RAM_PER_WORKER_GB = 0.6  # ver docstring de recommend_workers
+
+
 def recommend_workers(hw: dict) -> int:
     """
     Calcula o número recomendado de workers com base em hardware.
 
-    Fórmula: min(physical_cores, floor(ram_avail_gb / 0.35))
+    Fórmula: min(physical_cores, floor(ram_avail_gb / 0.6))
 
-    A partir da v11, cada processo carrega SEU PRÓPRIO YOLO + OCR (não mais
-    um único OCR compartilhado) — footprint de RAM por processo maior que
-    nas versões anteriores. 0.35 GB/processo é uma estimativa conservadora
-    para os dois modelos + buffers de imagem.
+    Cada processo carrega SEU PRÓPRIO YOLO + OCR. RSS medido empiricamente
+    de um processo já carregado e aquecido: ~425 MB. 0.6 GB/processo dá
+    margem para o crescimento de RSS durante o processamento real (buffers
+    de imagem, lotes de inferência) sem subestimar o risco de OOM — ver
+    config.MAX_TOTAL_INFLIGHT_IMAGES para o outro lado dessa mesma
+    proteção (limita quanto cada processo pode crescer via o tamanho do
+    lote YOLO).
 
-    O usuário pode exceder este valor para benchmarks acadêmicos.
+    O usuário pode exceder este valor manualmente para benchmarks
+    acadêmicos — recommend_workers só define o PADRÃO sugerido.
     """
     by_cpu = hw["physical_cores"]
-    by_ram = max(1, int(hw["ram_avail_gb"] / 0.35))
+    by_ram = max(1, int(hw["ram_avail_gb"] / _RAM_PER_WORKER_GB))
     return min(by_cpu, by_ram)
 
 
@@ -239,21 +246,40 @@ class _ProgressBar:
 def run_tasks(
     tasks: list, yolo_model: str,
     execution: str = "serial", workers: int = 1,
+    save_images: bool = True, show_progress_lines: bool = True,
+    pin_cpu: bool = False,
 ) -> tuple:
     """
     Executa as tasks no modo indicado.
+
+    save_images=False pula a gravação de crop/preprocessed em disco (modo
+    benchmark — isola o custo de CPU do custo de I/O).
+    show_progress_lines=False suprime a linha de resultado por imagem,
+    mantendo só a barra de progresso — reduz overhead de console em runs
+    com milhares de imagens.
+
+    IMPORTANTE sobre o que entra no `elapsed` medido:
+      Em ambos os modos, qualquer carregamento/aquecimento de modelo
+      acontece ANTES do cronômetro começar — paridade entre serial e
+      parallel. No modo parallel isso é crítico: cada um dos N processos
+      precisa fazer spawn + reimportar cv2/onnxruntime/ultralytics do zero
+      + carregar e aquecer seu próprio YOLO/OCR (ver _warmup_pool), um
+      custo fixo que NÃO encolhe com mais workers. Medi-lo dentro do
+      `elapsed` penaliza desproporcionalmente configurações com poucos
+      workers e é a causa mais provável de "parallel com 1 worker" aparecer
+      mais lento que o serial puro.
 
     Retorna: (results, elapsed, workers_requested, workers_effective,
               yolo_time, ocr_time)
     """
     workers_req = workers
-    t_start     = time.perf_counter()
     yolo_time   = 0.0
     ocr_time    = 0.0
 
     if execution == "serial":
         workers_eff = 1
-        init_serial_worker(yolo_model)
+        init_serial_worker(yolo_model, save_images)   # fora do tempo medido
+        t_start = time.perf_counter()
         results = []
         n       = len(tasks)
         bar     = _ProgressBar(n)
@@ -264,24 +290,31 @@ def run_tasks(
             results.append(r)
             yolo_time += r.get("yolo_time_s", 0.0)
             ocr_time  += r.get("ocr_time_s",  0.0)
-            bar.update(_format_result_line(i, n, r, mode="serial"))
+            line = _format_result_line(i, n, r, mode="serial") if show_progress_lines else ""
+            bar.update(line)
 
         bar.finish()
+        elapsed = time.perf_counter() - t_start
 
     elif execution == "parallel":
         workers_eff = workers
-        results, yolo_time, ocr_time = _run_parallel(tasks, yolo_model, workers_eff)
+        results, yolo_time, ocr_time, elapsed = _run_parallel(
+            tasks, yolo_model, workers_eff, save_images, show_progress_lines, pin_cpu,
+        )
     else:
         raise ValueError(f"Modo desconhecido: {execution!r}")
 
-    elapsed = time.perf_counter() - t_start
     return results, elapsed, workers_req, workers_eff, yolo_time, ocr_time
 
 
 
 # ── Modo PARALLEL (v11 — pipeline completo: YOLO + OCR juntos por processo) ──
 
-def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
+def _run_parallel(
+    tasks: list, yolo_model: str, n_workers: int,
+    save_images: bool = True, show_progress_lines: bool = True,
+    pin_cpu: bool = False,
+) -> tuple:
     """
     v11 — divide a lista de imagens em lotes e distribui entre N processos.
     Cada processo carrega SEU PRÓPRIO YOLO e SEU PRÓPRIO OCR
@@ -296,12 +329,12 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
       menos do que o speedup do OCR isoladamente, por mais que esse
       escalasse bem. Paralelizar as duas etapas juntas remove esse piso.
 
-    Retorna (all_results, yolo_time_sum, ocr_time_sum) — mesma assinatura
-    de antes (compatibilidade com main.py/report.py/html_report.py). Os
-    dois valores são SOMAS acumuladas do tempo gasto em cada etapa, dentro
-    de cada processo, somadas entre os N processos — não wall-clock. Os
-    números de wall-clock real (o que de fato importa para o speedup do
-    benchmark) são impressos no terminal ao final desta função.
+    Retorna (all_results, yolo_time_sum, ocr_time_sum, wall). Os dois
+    valores de tempo de estágio são SOMAS acumuladas do tempo gasto em cada
+    etapa, dentro de cada processo, somadas entre os N processos — não
+    wall-clock. `wall` é o tempo de parede real medido SOMENTE durante o
+    processamento das imagens (pool já aquecido — ver _warmup_pool) e é o
+    que de fato importa para o cálculo de speedup.
     """
     from src.config import CROPS_DIR, PREPROCESSED_DIR
 
@@ -319,27 +352,56 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
         C.CYAN
     ))
 
-    freq_before = _read_cpu_freq_mhz()
-    t_start     = time.perf_counter()
-
     all_results:    list = [None] * n
     no_plate_names: list = []
     worker_stats:   dict = {}   # pid -> [count, yolo_sum, ocr_sum]
     yolo_total_time = 0.0
     ocr_total_time  = 0.0
 
-    bar = _ProgressBar(n, label="Pipeline")
-    bar.start()
+    ctx        = mp.get_context("spawn")
+    chunks     = _chunk_list(tasks, n_workers)
+    barrier    = ctx.Barrier(n_workers + 1)   # +1 = processo pai (ver _warmup_pool)
+    yolo_batch = _effective_yolo_batch_size(n_workers)
 
-    ctx    = mp.get_context("spawn")
-    chunks = _chunk_list(tasks, n_workers)
+    affinity_list, worker_index_counter = None, None
+    if pin_cpu:
+        affinity_list = _compute_cpu_affinity(n_workers)
+        if affinity_list:
+            worker_index_counter = ctx.Value("i", 0)
 
     with ProcessPoolExecutor(
         max_workers=n_workers,
         mp_context=ctx,
         initializer=init_full_pipeline_process,
-        initargs=(yolo_model, stolen_plates),
+        initargs=(
+            yolo_model, stolen_plates, save_images, barrier, yolo_batch,
+            affinity_list, worker_index_counter,
+        ),
     ) as pool:
+        t_warmup = time.perf_counter()
+        _warmup_pool(pool, n_workers, barrier)
+        warmup_s = time.perf_counter() - t_warmup
+        affinity_note = (
+            f"  ·  CPU pinning: núcleos {affinity_list}" if affinity_list
+            else "  ·  CPU pinning: desligado" if pin_cpu
+            else ""
+        )
+        print(paint(
+            f"  [Pipeline paralelo] {n_workers} processo(s) prontos em "
+            f"{warmup_s:.2f}s (spawn + import + YOLO/OCR — fora do tempo medido)"
+            f"  ·  lote YOLO/processo: {yolo_batch}"
+            + (f" (reduzido de {YOLO_BATCH_SIZE} p/ limitar pico de memória)"
+               if yolo_batch < YOLO_BATCH_SIZE else "")
+            + affinity_note,
+            C.GRAY
+        ))
+
+        freq_before = _read_cpu_freq_mhz()
+        t_start     = time.perf_counter()
+
+        bar = _ProgressBar(n, label="Pipeline")
+        bar.start()
+
         future_to_chunk: dict = {}
         chunk_offset:    dict = {}
         offset = 0
@@ -372,7 +434,11 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
                 stat[1] += result.get("yolo_time_s", 0.0)
                 stat[2] += result.get("ocr_time_s", 0.0)
 
-                bar.update(_format_result_line(global_idx + 1, n, result, mode="parallel"))
+                line = (
+                    _format_result_line(global_idx + 1, n, result, mode="parallel")
+                    if show_progress_lines else ""
+                )
+                bar.update(line)
 
     bar.finish()
 
@@ -411,10 +477,45 @@ def _run_parallel(tasks: list, yolo_model: str, n_workers: int) -> tuple:
         ))
     _print_worker_distribution(worker_stats)
 
-    return all_results, yolo_total_time, ocr_total_time
+    return all_results, yolo_total_time, ocr_total_time, wall
 
 
 # ── Helpers de diagnóstico e particionamento ──────────────────────────────────
+
+def _noop() -> None:
+    """Task vazia — só serve para disparar o spawn dos processos do pool
+    (ProcessPoolExecutor cria processos sob demanda, não eagerly na
+    construção). A sincronização real de prontidão é feita pelo barrier
+    em _warmup_pool, não pelo resultado desta task."""
+
+
+def _warmup_pool(pool: ProcessPoolExecutor, n_workers: int, barrier) -> None:
+    """
+    Bloqueia até que os `n_workers` processos do pool tenham terminado
+    spawn + import de cv2/onnxruntime/ultralytics + carregamento e
+    warm-up de YOLO/OCR.
+
+    `barrier` tem n_workers+1 partes e foi passado a cada processo via
+    initargs (ver pipeline.init_full_pipeline_process) — cada um chama
+    barrier.wait() ao FINAL do seu initializer, depois dos modelos
+    carregados. Aqui o processo pai ocupa a parte +1: quando esta chamada
+    retorna, é GARANTIDO que todos os n_workers processos terminaram a
+    inicialização — diferente de esperar n_workers futures de tasks no-op,
+    onde um processo rápido poderia concluir 2 tasks enquanto outro, ainda
+    carregando o modelo, não pegou nenhuma (não provaria nada sobre esse
+    processo lento).
+
+    Chamado ANTES de iniciar o cronômetro do benchmark em _run_parallel.
+    Sem isso, o custo fixo de cold-start de N processos (vários segundos
+    por processo, em runs reais) entra no wall-clock medido — penaliza
+    desproporcionalmente configurações com poucos workers e não some com
+    o aumento de workers, distorcendo o speedup observado.
+    """
+    noop_futures = [pool.submit(_noop) for _ in range(n_workers)]
+    barrier.wait()
+    for fut in noop_futures:
+        fut.result()
+
 
 def _read_cpu_freq_mhz() -> float | None:
     """Lê a frequência atual da CPU (MHz), se disponível na plataforma."""
@@ -426,7 +527,59 @@ def _read_cpu_freq_mhz() -> float | None:
         return None
 
 
-_CHUNK_TARGET = 25  # imagens por lote — equilíbrio entre overhead de IPC e fluidez da barra
+def _compute_cpu_affinity(n_workers: int) -> list | None:
+    """
+    Escolhe a quais núcleos lógicos fixar cada um dos n_workers processos
+    (ver pipeline.init_full_pipeline_process). Retorna None se afinidade
+    não fizer sentido (não suportado na plataforma, ou pedindo mais
+    workers do que núcleos lógicos — nesse caso é melhor deixar o SO
+    decidir livremente).
+
+    ESTRATÉGIA: espalha os workers pelo intervalo COMPLETO de núcleos
+    lógicos (`round(i * logical / n_workers)`) em vez de pegar os
+    primeiros N em sequência (0, 1, 2, ...). Isso importa porque, em CPUs
+    com hyperthreading, o Windows tipicamente numera as 2 threads de UM
+    mesmo núcleo físico com índices ADJACENTES (0 e 1 = mesmo core, 2 e 3
+    = próximo core, etc.) — pedir núcleos 0,1,2,3 para 4 workers arrisca
+    colocar pares de processos no MESMO núcleo físico (competindo pelas
+    mesmas unidades de execução, bem pior que núcleos distintos).
+    Espalhar pelo intervalo completo (ex.: 0, 5, 10, 15 de 20 núcleos)
+    reduz drasticamente essa chance, sem precisar conhecer a topologia
+    exata P-core/E-core da CPU (não exposta de forma simples pelo SO).
+
+    Não tenta evitar núcleos E-core especificamente (não há como
+    distingui-los de forma portátil) — só reduz a chance de colisão de
+    hyperthreading via espalhamento.
+    """
+    try:
+        import psutil
+        logical = psutil.cpu_count(logical=True) or 0
+    except Exception:
+        return None
+
+    if logical <= 0 or n_workers <= 0 or n_workers > logical:
+        return None
+
+    return [round(i * logical / n_workers) % logical for i in range(n_workers)]
+
+
+def _effective_yolo_batch_size(n_workers: int) -> int:
+    """
+    Lote YOLO REAL por processo, possivelmente menor que config.YOLO_BATCH_SIZE.
+
+    O nº de imagens decodificadas em memória ao mesmo tempo em TODO o
+    sistema é (lote por processo) × n_workers — sem limitar isso, pedir
+    mais workers multiplica o pico de memória, podendo derrubar um
+    processo por falta de RAM. E como UM processo morto quebra o
+    ProcessPoolExecutor inteiro (BrokenProcessPool propaga para todos os
+    futures pendentes), isso não aparece como "um pouco mais lento": vira
+    uma cascata de erros no restante do run inteiro.
+
+    Mantém o total de imagens em memória limitado a
+    config.MAX_TOTAL_INFLIGHT_IMAGES não importa quantos workers sejam
+    pedidos.
+    """
+    return max(1, min(YOLO_BATCH_SIZE, MAX_TOTAL_INFLIGHT_IMAGES // max(1, n_workers)))
 
 
 def _chunk_list(tasks: list, n_workers: int) -> list:
@@ -437,12 +590,13 @@ def _chunk_list(tasks: list, n_workers: int) -> list:
     lote, não 1 por imagem) — relevante com milhares de imagens. Tamanho do
     lote: pequeno o bastante para manter vários lotes por worker (a barra
     de progresso continua atualizando com frequência), grande o bastante
-    para amortizar o overhead de serialização por chamada.
+    para amortizar o overhead de serialização por chamada. Alvo definido em
+    config.CHUNK_TARGET_IMAGES.
     """
     n = len(tasks)
     if n == 0:
         return []
-    target = max(1, min(_CHUNK_TARGET, n // max(1, n_workers * 4) or 1))
+    target = max(1, min(CHUNK_TARGET_IMAGES, n // max(1, n_workers * 4) or 1))
     return [tasks[i:i + target] for i in range(0, n, target)]
 
 

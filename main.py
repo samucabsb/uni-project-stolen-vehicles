@@ -1,5 +1,5 @@
 """
-Comparador Paralelo de Placas v10.2
+Comparador Paralelo de Placas v11
 =====================================
 
 Pipeline YOLO/ONNX (detecção) + fast-plate-ocr/CCT (reconhecimento) com
@@ -7,30 +7,23 @@ comparação contra lista de placas roubadas. Dois modos de execução:
 
   serial    1 processo, YOLO → OCR sequencial. Baseline para benchmark.
 
-  parallel  Two-stage com multiprocessing real:
-              Estágio 1: YOLO/ONNX em batch (processo principal)
-              Estágio 2: N PROCESSOS executam fast-plate-ocr em paralelo
-                         (ProcessPoolExecutor), cada um com sua própria
-                         sessão ONNX fixada em 1 thread interna — sem
-                         disputa entre sessões, escala de forma previsível
-                         com o número de núcleos físicos.
+  parallel  Pipeline COMPLETO (YOLO + OCR) distribuído entre N processos
+            via concurrent.futures.ProcessPoolExecutor — cada processo
+            carrega SEU PRÓPRIO YOLO e SEU PRÓPRIO OCR, ambos com
+            threading interna fixada em 1, e processa uma fatia completa
+            das imagens do início ao fim (ver src/pipeline.py e
+            src/executor.py para detalhes).
 
-Destaques da v10.2:
-  • Paralelismo do Estágio 2: threading → multiprocessing (processos reais,
-    sem GIL).
-  • Correção da causa raiz que limitava a escala: ONNX Runtime usa
-    intra_op_num_threads=0 ("auto") por padrão, ignorando as variáveis de
-    ambiente OMP_NUM_THREADS/etc. — cada sessão tentava usar todos os
-    núcleos, gerando disputa entre processos. Corrigido fixando
-    intra_op_num_threads=1 / inter_op_num_threads=1 via SessionOptions
-    explícitas (ver src/ocr.py).
-  • Estágio 2 recebe os crops em memória (array numpy), eliminando a
-    releitura de disco por processo.
-  • OCR: RapidOCR → CCT/fast-plate-ocr  (16x mais rápido, sem confusão L↔D)
-  • YOLO: PyTorch  → ONNX (exportado automaticamente na 1ª execução, ~2-3x)
-  • Speedup de paralelismo limitado pela Lei de Amdahl: com YOLO dominando
-    boa parte do tempo serial, o benefício de N processos no Estágio 2 é
-    proporcional à fração de tempo que o OCR representa no total.
+            Antes de iniciar o cronômetro do benchmark, todos os N
+            processos são aquecidos (spawn + import das libs pesadas +
+            carregamento e warm-up de YOLO/OCR) — esse custo fixo, que NÃO
+            encolhe com mais workers, é medido e impresso separadamente,
+            mas não entra no tempo total reportado (ver
+            executor._warmup_pool).
+
+  Use `--benchmark` para isolar o custo de CPU (YOLO+OCR) do custo de
+  I/O/console: desliga a gravação de crops/preprocessed em disco, a
+  geração do relatório HTML e a impressão de uma linha por imagem.
 """
 
 # ⚠️  force_single_thread_env() DEVE ser chamada antes de qualquer import de
@@ -48,6 +41,7 @@ from pathlib import Path
 from src.colors  import enable_ansi_colors, C, paint
 from src.config  import (
     INPUT_DIR, OUTPUT_DIR, STOLEN_PLATES_FILE, DEFAULT_YOLO_MODEL, VERSION,
+    SAVE_INTERMEDIATE_IMAGES,
 )
 from src.dataset  import ensure_directories, list_images, load_stolen_plates
 from src.detector import warmup_yolo, ensure_onnx_export
@@ -94,6 +88,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--quiet", action="store_true",
         help="Suprime mensagens INFO; mantém apenas WARNING+",
+    )
+    parser.add_argument(
+        "--no-save-images", action="store_true",
+        help="Não grava crops/preprocessed em disco (reduz I/O e CPU de benchmark).",
+    )
+    parser.add_argument(
+        "--no-html", action="store_true",
+        help="Não gera o relatório HTML.",
+    )
+    parser.add_argument(
+        "--pin-cpu", action="store_true",
+        help=(
+            "Fixa cada processo do modo parallel em um núcleo lógico "
+            "específico (psutil), espalhados pelo intervalo completo de "
+            "núcleos — reduz a chance do SO colocar 2 processos no mesmo "
+            "núcleo físico (hyperthreading) ou migrar processos entre "
+            "núcleos durante a execução. Experimental: compare com/sem."
+        ),
+    )
+    parser.add_argument(
+        "--benchmark", action="store_true",
+        help=(
+            "Modo benchmark: equivale a --no-save-images --no-html e suprime "
+            "a linha de resultado por imagem (mantém só a barra). Isola o "
+            "custo de CPU (YOLO+OCR) do custo de I/O/console para medir "
+            "speedup real."
+        ),
     )
     return parser.parse_args()
 
@@ -222,6 +243,19 @@ def main() -> int:
     execution, workers = resolve_execution(args)
     yolo_model         = args.yolo_model
 
+    save_images         = SAVE_INTERMEDIATE_IMAGES and not (args.benchmark or args.no_save_images)
+    generate_html       = not (args.benchmark or args.no_html)
+    show_progress_lines = not args.benchmark
+
+    if args.benchmark:
+        print(paint(
+            "\n[BENCHMARK] save_images=False · html=False · "
+            "sem linha de resultado por imagem",
+            C.YELLOW
+        ))
+    if args.pin_cpu:
+        print(paint("[PIN-CPU] Afinidade de núcleo por processo ativada (experimental)", C.YELLOW))
+
     ensure_directories()
 
     if not Path(yolo_model).exists():
@@ -271,6 +305,8 @@ def main() -> int:
 
     results, elapsed, w_req, w_eff, yolo_time, ocr_time = run_tasks(
         tasks, yolo_model, execution=execution, workers=workers,
+        save_images=save_images, show_progress_lines=show_progress_lines,
+        pin_cpu=args.pin_cpu,
     )
 
     results_file     = OUTPUT_DIR / "results.csv"
@@ -290,12 +326,13 @@ def main() -> int:
         yolo_time=yolo_time, ocr_time=ocr_time,
     )
 
-    generate_html_report(
-        results, elapsed, execution, w_req, w_eff, warmup_time,
-        html_report_file,
-    )
-    print(paint(f"\n[HTML] Relatório: {html_report_file}", C.CYAN_BOLD))
-    print(paint("       Abra no navegador para visualizar.", C.GRAY))
+    if generate_html:
+        generate_html_report(
+            results, elapsed, execution, w_req, w_eff, warmup_time,
+            html_report_file,
+        )
+        print(paint(f"\n[HTML] Relatório: {html_report_file}", C.CYAN_BOLD))
+        print(paint("       Abra no navegador para visualizar.", C.GRAY))
     return 0
 
 

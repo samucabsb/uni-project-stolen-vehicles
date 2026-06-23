@@ -185,6 +185,16 @@ def print_summary(
     print(f"  Não identificado  : {paint(str(counts[STATUS_UNIDENTIFIED]), C.YELLOW)}")
     if counts[STATUS_ERROR]:
         print(f"  Erros             : {paint(str(counts[STATUS_ERROR]), C.MAGENTA)}")
+        if execution == "parallel" and counts[STATUS_ERROR] / n > 0.05:
+            print(paint(
+                "  [AVISO] Muitos erros em lote no modo parallel costumam indicar "
+                "que UM processo do pool morreu (ex.: sem memória) e derrubou o "
+                "pool inteiro — os erros em cascata vêm de TODOS os lotes "
+                "pendentes naquele momento, não de falhas isoladas por imagem. "
+                "Tente reduzir --workers ou YOLO_BATCH_SIZE/MAX_TOTAL_INFLIGHT_IMAGES "
+                "em src/config.py.",
+                C.YELLOW
+            ))
 
     if counts[STATUS_STOLEN]:
         _print_stolen_alert(results)

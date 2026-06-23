@@ -1,7 +1,7 @@
 # 🚗 Detector Paralelo de Placas Veiculares
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=for-the-badge&logo=python&logoColor=white)
-![Paralelismo](https://img.shields.io/badge/Paralelismo-ThreadPoolExecutor-f97316?style=for-the-badge)
+![Paralelismo](https://img.shields.io/badge/Paralelismo-ProcessPoolExecutor-f97316?style=for-the-badge)
 ![Detector](https://img.shields.io/badge/Detector-YOLO%20v8%20ONNX-00b4d8?style=for-the-badge)
 ![OCR](https://img.shields.io/badge/OCR-fast--plate--ocr-8b5cf6?style=for-the-badge)
 ![Status](https://img.shields.io/badge/Status-Finalizado-22c55e?style=for-the-badge)
@@ -30,7 +30,22 @@ data/input/
 
 O projeto implementa um sistema de **reconhecimento automático de placas veiculares** em lote. O programa recebe imagens de veículos, detecta a região da placa com **YOLO v8 em formato ONNX**, recorta a placa detectada e realiza a leitura textual utilizando **fast-plate-ocr**. Em seguida, a placa reconhecida é comparada com uma lista local de veículos roubados.
 
-O objetivo principal da paralelização é diminuir o tempo total de processamento do dataset, distribuindo a etapa de OCR entre múltiplas threads por meio da biblioteca `concurrent.futures.ThreadPoolExecutor`.
+> **Nota sobre a versão atual (v11):** as seções abaixo (incluindo a tabela de
+> resultados) documentam um experimento feito com a arquitetura anterior
+> (v10.x), em que apenas o OCR era paralelizado via `ThreadPoolExecutor`
+> enquanto o YOLO rodava inteiramente no processo principal — por isso o
+> speedup ficava limitado pela Lei de Amdahl bem antes de saturar os núcleos.
+> A versão atual paraleliza o pipeline **completo** (YOLO + OCR) via
+> `concurrent.futures.ProcessPoolExecutor`: cada processo carrega seu próprio
+> YOLO e seu próprio OCR, ambos com threading interna fixada em 1 (evita
+> oversubscription entre processos), e processa uma fatia completa das
+> imagens do início ao fim. Há também um modo `--benchmark` (`main.py`) que
+> desliga a gravação de crops/preprocessed em disco e a impressão de uma
+> linha por imagem, isolando o custo de CPU (YOLO+OCR) do custo de I/O/console
+> ao medir desempenho. Os números abaixo precisam ser re-coletados com a
+> arquitetura atual para refletir o comportamento real do sistema.
+
+O objetivo principal da paralelização é diminuir o tempo total de processamento do dataset, distribuindo o pipeline completo (YOLO + OCR) entre múltiplos processos por meio da biblioteca `concurrent.futures.ProcessPoolExecutor`.
 
 ### 1.1 Volume de dados processado
 
@@ -266,6 +281,20 @@ python main.py --no-interactive --execution parallel --workers 2
 python main.py --no-interactive --execution parallel --workers 4
 python main.py --no-interactive --execution parallel --workers 8
 python main.py --no-interactive --execution parallel --workers 12
+```
+
+Para medir o custo de CPU (YOLO+OCR) isolado do custo de I/O — sem gravar crops/preprocessed em disco, sem gerar HTML e sem imprimir uma linha por imagem — use `--benchmark`:
+
+```powershell
+python main.py --no-interactive --execution parallel --workers 4 --benchmark
+```
+
+Os parâmetros `YOLO_BATCH_SIZE` (lote interno de inferência YOLO) e `CHUNK_TARGET_IMAGES` (nº de imagens por lote enviado a cada processo) ficam em `src/config.py`, caso queira testar outros valores. `MAX_TOTAL_INFLIGHT_IMAGES` limita o nº de imagens decodificadas em memória simultaneamente em todo o sistema (lote × nº de workers) — protege contra picos de memória com muitos workers, mesmo que `YOLO_BATCH_SIZE` seja alto.
+
+Se o speedup parar de subir bem antes do nº de núcleos físicos (ex.: já achatando em 2-4 workers numa CPU de 12 núcleos), o agendador do Windows pode estar colocando processos no mesmo núcleo físico (hyperthreading) ou migrando-os entre núcleos durante a execução. Teste fixar afinidade de CPU com `--pin-cpu` e compare:
+
+```powershell
+python main.py --no-interactive --execution parallel --workers 4 --benchmark --pin-cpu
 ```
 
 ---
