@@ -335,3 +335,336 @@ uni-project-stolen-vehicles/
 ---
 
 Projeto desenvolvido para a disciplina de **Programação Concorrente e Distribuída**.
+
+
+================================================================   python main.py --no-interactive --execution parallel --workers 2 --benchmark --pin-cpu
+>> env) PS C:\Users\Usuário\Documents\uni-project-stolen-vehicles> 
+
+  Comparador de Placas v11.0
+
+===== HARDWARE =====
+  4 físicos / 8 lógicos  ·  7.9 GB RAM (4.9 GB livre)
+  CPU clock atual: 2001 MHz / máx 2001 MHz
+[INFO] 2 processo(s) ≤ 4 físicos → configuração ideal
+
+[BENCHMARK] save_images=False · html=False · sem linha de resultado por imagem
+[PIN-CPU] Afinidade de núcleo por processo ativada (experimental)
+[YOLO] ONNX em cache: license_plate_detector.onnx
+
+===== WARM-UP =====
+[WARMUP] YOLO (ONNX) pronto.
+[WARMUP] fast-plate-ocr (cct-s-v2-global-model) pronto.
+  Concluído em 6.6087s
+[INFO] 250 placa(s) roubada(s) carregada(s).
+
+===== EXECUTANDO =====
+  Modo      : PARALLEL · 2 processos
+  Imagens   : 1500
+  Modelo    : C:\Users\Usuário\Documents\uni-project-stolen-vehicles\models\license_plate_detector.onnx
+
+  [Pipeline paralelo] 1500 imagens em 2 processos (cada um com seu próprio YOLO + OCR)...
+
+  [Pipeline paralelo] 2 processo(s) prontos em 7.39s (spawn + import + YOLO/OCR — fora do tempo medido)  ·  lote YOLO/processo: 32  ·  CPU pinning: núcleos [0, 4]
+  Pipeline  [████████████████████]  1500/1500  100%  118.7s                                    
+
+  [Pipeline paralelo] Concluído em 118.70s  →  1500 com placa  |  0 sem placa
+  YOLO+OCR acumulado (soma dos 2 processos): 220.72s  ·  utilização média: 93%
+  CPU clock: 2001 MHz → 2001 MHz  (+0% — estável)
+
+  Distribuição por processo:
+    pid=5388    800 imagens  ·  YOLO 95.9 ms/img  ·  OCR 50.7 ms/img
+    pid=10180    700 imagens  ·  YOLO 96.8 ms/img  ·  OCR 51.1 ms/img
+
+  [CSV] results.csv (1500 linhas)
+  [CSV] performance_log.csv (linha adicionada)
+
+================================================================
+  SUMÁRIO DE EXECUÇÃO
+================================================================
+  Modo              : PARALLEL
+  Workers           : 2
+  Imagens           : 1500
+  Warm-up           : 6.6087 s
+  Tempo total       : 118.6988 s
+  Média por imagem  : 0.0791 s
+  Throughput        : 12.64 img/s
+----------------------------------------------------------------
+  YOLO (detecção)   : 144.43 s  (65.4%)
+  OCR  (leitura)    :  76.29 s  (34.6%)
+----------------------------------------------------------------
+  Com placa         : 1500
+  Sem placa         : 0
+  Status OK         : 1250
+  Status ROUBADO    : 250
+  Não identificado  : 0
+
+================================================================
+  🚨  ALERTA: 250 VEÍCULO(S) ROUBADO(S) IDENTIFICADO(S)  🚨
+================================================================
+
+================================================================
+(.venv) PS C:\Users\Usuário\Documents\uni-project-stolen-vehicles> python main.py --no-interactive --execution parallel --workers 4 --benchmark --pin-cpu
+
+  Comparador de Placas v11.0
+
+===== HARDWARE =====
+  4 físicos / 8 lógicos  ·  7.9 GB RAM (4.9 GB livre)
+  CPU clock atual: 1800 MHz / máx 2001 MHz
+[INFO] 4 processo(s) ≤ 4 físicos → configuração ideal
+
+[BENCHMARK] save_images=False · html=False · sem linha de resultado por imagem
+[PIN-CPU] Afinidade de núcleo por processo ativada (experimental)
+[YOLO] ONNX em cache: license_plate_detector.onnx
+
+===== WARM-UP =====
+[WARMUP] YOLO (ONNX) pronto.
+[WARMUP] fast-plate-ocr (cct-s-v2-global-model) pronto.
+  Concluído em 7.9583s
+[INFO] 250 placa(s) roubada(s) carregada(s).
+
+===== EXECUTANDO =====
+  Modo      : PARALLEL · 4 processos
+  Imagens   : 1500
+  Modelo    : C:\Users\Usuário\Documents\uni-project-stolen-vehicles\models\license_plate_detector.onnx
+
+  [Pipeline paralelo] 1500 imagens em 4 processos (cada um com seu próprio YOLO + OCR)...
+
+  [Pipeline paralelo] 4 processo(s) prontos em 8.89s (spawn + import + YOLO/OCR — fora do tempo medido)  ·  lote YOLO/processo: 16 (reduzido de 32 p/ limitar pico de memória)  ·  CPU pinning: núcleos [0, 2, 4, 6]
+  Pipeline  [████████████████████]  1500/1500  100%  72.7s                                     
+
+  [Pipeline paralelo] Concluído em 72.73s  →  1500 com placa  |  0 sem placa
+  YOLO+OCR acumulado (soma dos 4 processos): 280.47s  ·  utilização média: 96%
+  CPU clock: 2001 MHz → 2001 MHz  (+0% — estável)
+
+  Distribuição por processo:
+    pid=5664    372 imagens  ·  YOLO 118.5 ms/img  ·  OCR 69.4 ms/img
+    pid=6096    372 imagens  ·  YOLO 123.0 ms/img  ·  OCR 64.2 ms/img
+    pid=8508    372 imagens  ·  YOLO 123.2 ms/img  ·  OCR 64.1 ms/img
+    pid=9228    384 imagens  ·  YOLO 121.7 ms/img  ·  OCR 63.9 ms/img
+
+  [CSV] results.csv (1500 linhas)
+  [CSV] performance_log.csv (linha adicionada)
+
+================================================================
+  SUMÁRIO DE EXECUÇÃO
+================================================================
+  Modo              : PARALLEL
+  Workers           : 4
+  Imagens           : 1500
+  Warm-up           : 7.9583 s
+  Tempo total       : 72.7312 s
+  Média por imagem  : 0.0485 s
+  Throughput        : 20.62 img/s
+----------------------------------------------------------------
+  YOLO (detecção)   : 182.41 s  (65.0%)
+  OCR  (leitura)    :  98.06 s  (35.0%)
+----------------------------------------------------------------
+  Com placa         : 1500
+  Sem placa         : 0
+  Status OK         : 1250
+  Status ROUBADO    : 250
+  Não identificado  : 0
+
+================================================================
+  🚨  ALERTA: 250 VEÍCULO(S) ROUBADO(S) IDENTIFICADO(S)  🚨
+================================================================
+
+================================================================
+(.venv) PS C:\Users\Usuário\Documents\uni-project-stolen-vehicles> python main.py --no-interactive --execution parallel --workers 8 --benchmark --pin-cpu
+
+  Comparador de Placas v11.0
+
+===== HARDWARE =====
+  4 físicos / 8 lógicos  ·  7.9 GB RAM (5.4 GB livre)
+  CPU clock atual: 2001 MHz / máx 2001 MHz
+[INFO] 8 processo(s) > 4 físicos → usando hyperthreading
+
+[BENCHMARK] save_images=False · html=False · sem linha de resultado por imagem
+[PIN-CPU] Afinidade de núcleo por processo ativada (experimental)
+[YOLO] ONNX em cache: license_plate_detector.onnx
+
+===== WARM-UP =====
+[WARMUP] YOLO (ONNX) pronto.
+[WARMUP] fast-plate-ocr (cct-s-v2-global-model) pronto.
+  Concluído em 7.7777s
+[INFO] 250 placa(s) roubada(s) carregada(s).
+
+===== EXECUTANDO =====
+  Modo      : PARALLEL · 8 processos
+  Imagens   : 1500
+  Modelo    : C:\Users\Usuário\Documents\uni-project-stolen-vehicles\models\license_plate_detector.onnx
+
+  [Pipeline paralelo] 1500 imagens em 8 processos (cada um com seu próprio YOLO + OCR)...
+
+  [Pipeline paralelo] 8 processo(s) prontos em 14.68s (spawn + import + YOLO/OCR — fora do tempo medido)  ·  lote YOLO/processo: 8 (reduzido de 32 p/ limitar pico de memória)  ·  CPU pinning: núcleos [0, 1, 2, 3, 4, 5, 6, 7]
+  Pipeline  [████████████████████]  1500/1500  100%  76.3s                                     
+
+  [Pipeline paralelo] Concluído em 76.28s  →  1500 com placa  |  0 sem placa
+  YOLO+OCR acumulado (soma dos 8 processos): 564.37s  ·  utilização média: 92%
+  CPU clock: 2001 MHz → 2001 MHz  (+0% — estável)
+
+  Distribuição por processo:
+    pid=840    184 imagens  ·  YOLO 247.4 ms/img  ·  OCR 124.9 ms/img
+    pid=3816    184 imagens  ·  YOLO 247.3 ms/img  ·  OCR 135.7 ms/img
+    pid=6168    184 imagens  ·  YOLO 258.6 ms/img  ·  OCR 138.5 ms/img
+    pid=6380    184 imagens  ·  YOLO 254.4 ms/img  ·  OCR 132.4 ms/img
+    pid=7224    184 imagens  ·  YOLO 233.6 ms/img  ·  OCR 130.5 ms/img
+    pid=8144    184 imagens  ·  YOLO 241.9 ms/img  ·  OCR 131.7 ms/img
+    pid=10736    184 imagens  ·  YOLO 259.4 ms/img  ·  OCR 143.3 ms/img
+    pid=13304    212 imagens  ·  YOLO 220.6 ms/img  ·  OCR 115.9 ms/img
+
+  [CSV] results.csv (1500 linhas)
+  [CSV] performance_log.csv (linha adicionada)
+
+================================================================
+  SUMÁRIO DE EXECUÇÃO
+================================================================
+  Modo              : PARALLEL
+  Workers           : 8
+  Imagens           : 1500
+  Warm-up           : 7.7777 s
+  Tempo total       : 76.2805 s
+  Média por imagem  : 0.0509 s
+  Throughput        : 19.66 img/s
+----------------------------------------------------------------
+  YOLO (detecção)   : 367.39 s  (65.1%)
+  OCR  (leitura)    : 196.98 s  (34.9%)
+----------------------------------------------------------------
+  Com placa         : 1500
+  Sem placa         : 0
+  Status OK         : 1250
+  Status ROUBADO    : 250
+  Não identificado  : 0
+
+================================================================
+  🚨  ALERTA: 250 VEÍCULO(S) ROUBADO(S) IDENTIFICADO(S)  🚨
+================================================================
+
+================================================================
+(.venv) PS C:\Users\Usuário\Documents\uni-project-stolen-vehicles> python main.py --no-interactive --execution parallel --workers 12 --benchmark --pin-cpu
+>> 
+
+  Comparador de Placas v11.0
+
+===== HARDWARE =====
+  4 físicos / 8 lógicos  ·  7.9 GB RAM (5.7 GB livre)
+  CPU clock atual: 2001 MHz / máx 2001 MHz
+[INFO] 12 processo(s) > 8 lógicos → oversubscription (válido para benchmark)
+
+[BENCHMARK] save_images=False · html=False · sem linha de resultado por imagem
+[PIN-CPU] Afinidade de núcleo por processo ativada (experimental)
+[YOLO] ONNX em cache: license_plate_detector.onnx
+
+===== WARM-UP =====
+[WARMUP] YOLO (ONNX) pronto.
+[WARMUP] fast-plate-ocr (cct-s-v2-global-model) pronto.
+  Concluído em 7.8148s
+[INFO] 250 placa(s) roubada(s) carregada(s).
+
+===== EXECUTANDO =====
+  Modo      : PARALLEL · 12 processos
+  Imagens   : 1500
+  Modelo    : C:\Users\Usuário\Documents\uni-project-stolen-vehicles\models\license_plate_detector.onnx
+
+  [Pipeline paralelo] 1500 imagens em 12 processos (cada um com seu próprio YOLO + OCR)...
+
+  [Pipeline paralelo] 12 processo(s) prontos em 23.25s (spawn + import + YOLO/OCR — fora do tempo medido)  ·  lote YOLO/processo: 5 (reduzido de 32 p/ limitar pico de memória)  ·  CPU pinning: desligado
+  Pipeline  [████████████████████]  1500/1500  100%  102.4s                                    
+
+  [Pipeline paralelo] Concluído em 102.44s  →  1500 com placa  |  0 sem placa
+  YOLO+OCR acumulado (soma dos 12 processos): 1134.27s  ·  utilização média: 92%
+  CPU clock: 2001 MHz → 2001 MHz  (+0% — estável)
+
+  Distribuição por processo:
+    pid=1752    124 imagens  ·  YOLO 545.8 ms/img  ·  OCR 182.2 ms/img
+    pid=2576    124 imagens  ·  YOLO 521.0 ms/img  ·  OCR 196.6 ms/img
+    pid=3304    124 imagens  ·  YOLO 603.5 ms/img  ·  OCR 185.1 ms/img
+    pid=4756    136 imagens  ·  YOLO 506.8 ms/img  ·  OCR 186.6 ms/img
+    pid=5724    124 imagens  ·  YOLO 538.2 ms/img  ·  OCR 199.0 ms/img
+    pid=6344    124 imagens  ·  YOLO 541.2 ms/img  ·  OCR 200.5 ms/img
+    pid=6492    124 imagens  ·  YOLO 618.1 ms/img  ·  OCR 176.9 ms/img
+    pid=6964    124 imagens  ·  YOLO 608.0 ms/img  ·  OCR 186.6 ms/img
+    pid=9808    124 imagens  ·  YOLO 604.9 ms/img  ·  OCR 191.1 ms/img
+    pid=10120    124 imagens  ·  YOLO 555.1 ms/img  ·  OCR 196.2 ms/img
+    pid=12772    124 imagens  ·  YOLO 600.5 ms/img  ·  OCR 189.4 ms/img
+    pid=13084    124 imagens  ·  YOLO 551.0 ms/img  ·  OCR 196.1 ms/img
+
+  [CSV] results.csv (1500 linhas)
+  [CSV] performance_log.csv (linha adicionada)
+
+================================================================
+  SUMÁRIO DE EXECUÇÃO
+================================================================
+  Modo              : PARALLEL
+  Workers           : 12
+  Imagens           : 1500
+  Warm-up           : 7.8148 s
+  Tempo total       : 102.4390 s
+  Média por imagem  : 0.0683 s
+  Throughput        : 14.64 img/s
+----------------------------------------------------------------
+  YOLO (detecção)   : 848.54 s  (74.8%)
+  OCR  (leitura)    : 285.74 s  (25.2%)
+----------------------------------------------------------------
+  Com placa         : 1500
+  Sem placa         : 0
+  Status OK         : 1250
+  Status ROUBADO    : 250
+  Não identificado  : 0
+
+================================================================
+  🚨  ALERTA: 250 VEÍCULO(S) ROUBADO(S) IDENTIFICADO(S)  🚨
+================================================================
+
+================================================================
+(.venv) PS C:\Users\Usuário\Documents\uni-project-stolen-vehicles> python main.py --no-interactive --execution serial --benchmark --pin-cpu
+
+  Comparador de Placas v11.0
+
+===== HARDWARE =====
+  4 físicos / 8 lógicos  ·  7.9 GB RAM (5.7 GB livre)
+  CPU clock atual: 2001 MHz / máx 2001 MHz
+
+[BENCHMARK] save_images=False · html=False · sem linha de resultado por imagem
+[PIN-CPU] Afinidade de núcleo por processo ativada (experimental)
+[YOLO] ONNX em cache: license_plate_detector.onnx
+
+===== WARM-UP =====
+[WARMUP] YOLO (ONNX) pronto.
+[WARMUP] fast-plate-ocr (cct-s-v2-global-model) pronto.
+  Concluído em 9.3465s
+[INFO] 250 placa(s) roubada(s) carregada(s).
+
+===== EXECUTANDO =====
+  Modo      : SERIAL
+  Imagens   : 1500
+  Modelo    : C:\Users\Usuário\Documents\uni-project-stolen-vehicles\models\license_plate_detector.onnx
+
+  [████████████████████]  1500/1500  100%  174.2s                                              
+
+  [CSV] results.csv (1500 linhas)
+  [CSV] performance_log.csv (linha adicionada)
+
+================================================================
+  SUMÁRIO DE EXECUÇÃO
+================================================================
+  Modo              : SERIAL
+  Workers           : 1
+  Imagens           : 1500
+  Warm-up           : 9.3465 s
+  Tempo total       : 174.2278 s
+  Média por imagem  : 0.1162 s
+  Throughput        : 8.61 img/s
+----------------------------------------------------------------
+  YOLO (detecção)   :  99.21 s  (66.2%)
+  OCR  (leitura)    :  50.74 s  (33.8%)
+----------------------------------------------------------------
+  Com placa         : 1500
+  Sem placa         : 0
+  Status OK         : 1250
+  Status ROUBADO    : 250
+  Não identificado  : 0
+
+================================================================
+  🚨  ALERTA: 250 VEÍCULO(S) ROUBADO(S) IDENTIFICADO(S)  🚨
+================================================================
