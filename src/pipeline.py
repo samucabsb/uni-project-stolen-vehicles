@@ -108,6 +108,7 @@ def init_serial_worker(yolo_model_path: str, save_images: bool = True) -> None:
     """
     global _serial_yolo, _serial_ocr, _serial_save_images
     init_runtime()
+    _patch_onnxruntime_threads(1)
 
     from ultralytics import YOLO
     _serial_yolo        = YOLO(yolo_model_path)

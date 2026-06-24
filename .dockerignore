@@ -1,0 +1,17 @@
+# Arquivos grandes — montados via volume no docker run
+data/
+models/
+graficos/
+
+# Git e cache Python
+.git/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Arquivos de ambiente
+.env
+*.egg-info/
+dist/
+build/

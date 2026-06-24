@@ -60,6 +60,8 @@ def quantize(model_path: str, output_path: str | None = None) -> str:
     Aplica quantização dinâmica INT8 ao modelo ONNX.
     Retorna o caminho do arquivo gerado.
     """
+    import shutil
+    import tempfile
     from onnxruntime.quantization import quantize_dynamic, QuantType
 
     src = Path(model_path)
@@ -84,14 +86,26 @@ def quantize(model_path: str, output_path: str | None = None) -> str:
     print("           Quantizando pesos FP32 → INT8 (sem calibração)...")
     print("           Isso pode levar 30-120 s na primeira execução.\n")
 
+    # onnxruntime cria um arquivo intermediário "*-inferred.onnx" no mesmo
+    # diretório do modelo. Se o caminho contém caracteres não-ASCII (ex.:
+    # "Usuário"), a camada C++ do onnxruntime falha silenciosamente ao
+    # escrever o arquivo, causando FileNotFoundError na leitura seguinte.
+    # Solução: copiar o modelo para um diretório temporário ASCII-seguro,
+    # quantizar lá, copiar o resultado de volta.
     try:
-        quantize_dynamic(
-            model_input=str(src),
-            model_output=str(dst),
-            weight_type=QuantType.QUInt8,
-            optimize_model=True,
-            per_channel=False,
-        )
+        with tempfile.TemporaryDirectory(prefix="ort_quant_") as tmpdir:
+            tmp_src = Path(tmpdir) / "model.onnx"
+            tmp_dst = Path(tmpdir) / "model_int8.onnx"
+            shutil.copy2(str(src), str(tmp_src))
+
+            quantize_dynamic(
+                model_input=str(tmp_src),
+                model_output=str(tmp_dst),
+                weight_type=QuantType.QUInt8,
+                per_channel=False,
+            )
+
+            shutil.copy2(str(tmp_dst), str(dst))
     except Exception as exc:
         print(f"[ERRO] Quantização falhou: {exc}")
         if dst.exists():
