@@ -10,7 +10,7 @@ from pathlib import Path
 
 # ── Versão ────────────────────────────────────────────────────────────────────
 
-VERSION = "11.0"
+VERSION = "11.2"
 
 
 # ── Diretórios principais ─────────────────────────────────────────────────────
@@ -58,12 +58,19 @@ BBOX_PADDING_RATIO = 0.08
 YOLO_BATCH_SIZE = 32
 
 # Teto do nº de imagens decodificadas em memória SIMULTANEAMENTE somando
-# TODOS os processos do pool (ver YOLO_BATCH_SIZE acima). 64 é uma margem
-# segura para máquinas com 16 GB de RAM com os modelos atuais (~450 MB de
-# RSS por processo já carregado, medido empiricamente) — ajuste para baixo
-# se ainda vir processos sendo encerrados (erros em massa, queda do
-# terminal) com muitos workers.
-MAX_TOTAL_INFLIGHT_IMAGES = 64
+# TODOS os processos do pool (ver YOLO_BATCH_SIZE acima).
+#
+# v11.2 — elevado de 64 para 96: medições reais (ver performance_log) numa
+# máquina de 6 físicos/12 lógicos com 7-8 GB livres mostraram RSS bem
+# abaixo do limite de segurança mesmo em 12 processos simultâneos, e o
+# lote por processo ficava pequeno demais em alta contagem de workers
+# (8 workers → lote 8 ; 12 workers → lote 5), amortizando mal o overhead
+# fixo por chamada Python/ONNX — parte da degradação observada em 8 e 12
+# workers vem daí, não só de contenção de CPU. Com 96: 8 workers → lote 12,
+# 12 workers → lote 8. Se RAM disponível for menor que ~6 GB no ambiente de
+# destino, volte para 64 (ou menos) — ajuste para baixo se vir processos
+# sendo encerrados (erros em massa, queda do terminal) com muitos workers.
+MAX_TOTAL_INFLIGHT_IMAGES = 96
 
 
 # ── Paralelismo / particionamento de tarefas ──────────────────────────────────
@@ -83,6 +90,46 @@ CHUNK_TARGET_IMAGES = 100
 # cresce com o nº de workers — desligar isso isola o custo de CPU puro
 # (YOLO + OCR) do custo de I/O. Ativado via `--no-save-images` / `--benchmark`.
 SAVE_INTERMEDIATE_IMAGES = True
+
+
+# ── Threading das sessões ONNX (YOLO + OCR) por worker ────────────────────────
+#
+# Threads ORT intra-op (e cv2/torch) usadas dentro de CADA processo worker
+# do modo parallel — ver pipeline._patch_onnxruntime_threads e
+# pipeline.init_full_pipeline_process.
+#
+# Existem duas filosofias possíveis aqui, e elas medem coisas DIFERENTES:
+#
+#   1. FIXO EM 1 (padrão, valor abaixo)
+#      Cada worker usa exatamente 1 thread interna, sempre, não importa
+#      quantos workers existam. Isolamento limpo de paralelismo por
+#      PROCESSO: com 1 worker você vê 1 thread ativa; com N workers, N
+#      threads ativas e — se o trabalho for CPU-bound e bem balanceado —
+#      speedup próximo de N. É o que permite comparar serial vs. parallel
+#      e calcular eficiência (speedup / N) de forma direta, sem outra
+#      variável de confusão. Use este modo para o relatório/benchmark
+#      acadêmico, gráficos de speedup e qualquer comparação 1→N workers.
+#
+#   2. ADAPTATIVO ("preencher núcleos ociosos")
+#      Com poucos workers, cada um ganha mais threads intra-op
+#      (max(1, physical_cores // n_workers)) para não deixar núcleos
+#      físicos ociosos. Maximiza a taxa de processamento bruta (imagens/s)
+#      quando você só se importa com o tempo total e não com a forma como
+#      ele escala — mas mistura paralelismo intra-operação (várias threads
+#      acelerando UMA inferência) com paralelismo entre processos (N
+#      inferências distintas ao mesmo tempo). Essas duas formas de
+#      paralelismo NÃO somam linearmente: o nº total de threads ativas no
+#      sistema pode ficar quase constante entre 1 e 2 workers (ex.: 6
+#      threads em ambos os casos num CPU de 6 físicos), fazendo o speedup
+#      observado entre essas configurações parecer próximo de 1x mesmo
+#      com o dobro de processos — o sintoma clássico de "rodei com 1
+#      worker e vi todos os núcleos ocupados".
+#
+# ORT_THREADS_PER_WORKER fixa a opção (1). Para usar a estratégia
+# adaptativa (filosofia 2) como experimento separado, veja o parâmetro
+# fill_cores em executor.run_tasks/_run_parallel — ele é opt-in e não
+# afeta o padrão.
+ORT_THREADS_PER_WORKER = 1
 
 
 # ── Motor OCR ─────────────────────────────────────────────────────────────────

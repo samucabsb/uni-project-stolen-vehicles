@@ -267,7 +267,7 @@ _fp_yolo_batch    = _FULL_PIPELINE_YOLO_BATCH
 
 
 def init_full_pipeline_process(
-    yolo_model_path: str, stolen_plates: frozenset,
+    yolo_model_path: str, stolen_plates: set | frozenset,
     save_images: bool = True, ready_barrier=None,
     yolo_batch_size: int | None = None,
     affinity_list: list | None = None, worker_index_counter=None,

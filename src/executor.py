@@ -20,13 +20,34 @@ Dois modos disponíveis:
     N YOLOs + N OCRs simultâneos, cada um numa fatia das imagens.
 
   Threading das sessões ONNX (ver pipeline.py para detalhes):
-    Tanto o YOLO quanto o OCR têm sua sessão ONNX fixada em 1 thread
-    interna em cada processo — sem isso, N processos x 2 sessões cada
-    tentariam usar todos os núcleos simultaneamente, gerando oversubscription
-    severa (pior que a já observada com o OCR isolado, pois o YOLO é mais
-    pesado). OCR: via sess_options diretas (ocr.py). YOLO: via monkeypatch
-    de processo, já que a API pública do ultralytics.YOLO não aceita
-    SessionOptions (ver _patch_onnxruntime_single_thread em pipeline.py).
+    Tanto o YOLO quanto o OCR têm sua sessão ONNX fixada em
+    config.ORT_THREADS_PER_WORKER threads internas em cada processo —
+    sem isso, N processos x 2 sessões cada tentariam usar todos os
+    núcleos simultaneamente, gerando oversubscription severa (pior do
+    que a já observada com o OCR isolado, pois o YOLO é mais pesado).
+    OCR e YOLO compartilham o mesmo monkeypatch de processo, já que a
+    API pública do ultralytics.YOLO não aceita SessionOptions (ver
+    _patch_onnxruntime_threads em pipeline.py).
+
+  v11.1 — threads ORT fixas por padrão (não mais adaptativas):
+    Antes, o nº de threads ORT por worker escalava como
+    max(1, physical_cores // n_workers) — com poucos workers, cada um
+    ganhava MAIS threads internas para "preencher" núcleos ociosos. Isso
+    maximiza throughput bruto, mas mistura paralelismo intra-operação
+    (várias threads acelerando UMA inferência) com paralelismo entre
+    processos (N inferências distintas ao mesmo tempo): o nº total de
+    threads ativas no sistema podia ficar quase constante entre
+    1 e 2 workers, fazendo o speedup observado parecer ~1x mesmo com o
+    dobro de processos, e o "1 worker" sozinho aparecia usando todos os
+    núcleos lógicos da máquina — o paralelismo real (entre processos)
+    fica invisível.
+    Agora o padrão é fixo (config.ORT_THREADS_PER_WORKER, =1): 1 worker
+    = 1 thread ORT ativa, sempre. N workers = N threads ativas. Speedup
+    observado passa a refletir paralelismo de processo de forma direta —
+    o que se quer demonstrar/medir num benchmark de concorrência. A
+    estratégia adaptativa antiga continua disponível como experimento
+    opt-in via fill_cores=True em run_tasks/_run_parallel, para quem
+    quiser comparar throughput bruto separadamente.
 
   Diagnósticos:
     Tarefas são agrupadas em lotes (ver _chunk_list) para reduzir o nº de
@@ -51,7 +72,7 @@ from src.colors import C, paint
 from src.config import (
     STATUS_OK, STATUS_STOLEN, STATUS_UNIDENTIFIED, STATUS_ERROR,
     CROPS_DIR, PREPROCESSED_DIR, CHUNK_TARGET_IMAGES,
-    YOLO_BATCH_SIZE, MAX_TOTAL_INFLIGHT_IMAGES,
+    YOLO_BATCH_SIZE, MAX_TOTAL_INFLIGHT_IMAGES, ORT_THREADS_PER_WORKER,
 )
 from src.logger import get_logger
 
@@ -247,7 +268,7 @@ def run_tasks(
     tasks: list, yolo_model: str,
     execution: str = "serial", workers: int = 1,
     save_images: bool = True, show_progress_lines: bool = True,
-    pin_cpu: bool = False,
+    pin_cpu: bool = False, fill_cores: bool = False,
 ) -> tuple:
     """
     Executa as tasks no modo indicado.
@@ -257,6 +278,19 @@ def run_tasks(
     show_progress_lines=False suprime a linha de resultado por imagem,
     mantendo só a barra de progresso — reduz overhead de console em runs
     com milhares de imagens.
+
+    fill_cores (padrão False — ver _ort_threads_per_worker):
+      False → cada worker do modo parallel usa exatamente
+              config.ORT_THREADS_PER_WORKER (1) thread interna na sessão
+              ONNX, sempre. 1 worker = 1 thread visível; N workers = N
+              threads visíveis. É o que permite uma curva de speedup
+              limpa (1→N workers) e comparável ao baseline serial.
+      True  → modo adaptativo antigo: cada worker recebe
+              max(1, physical_cores // n_workers) threads internas, para
+              preencher núcleos que ficariam ociosos com poucos workers.
+              Maximiza throughput bruto, mas não é apropriado para medir
+              speedup por Nº DE PROCESSOS, já que mistura paralelismo
+              intra-operação com paralelismo entre processos.
 
     IMPORTANTE sobre o que entra no `elapsed` medido:
       Em ambos os modos, qualquer carregamento/aquecimento de modelo
@@ -299,7 +333,8 @@ def run_tasks(
     elif execution == "parallel":
         workers_eff = workers
         results, yolo_time, ocr_time, elapsed = _run_parallel(
-            tasks, yolo_model, workers_eff, save_images, show_progress_lines, pin_cpu,
+            tasks, yolo_model, workers_eff, save_images, show_progress_lines,
+            pin_cpu, fill_cores,
         )
     else:
         raise ValueError(f"Modo desconhecido: {execution!r}")
@@ -313,7 +348,7 @@ def run_tasks(
 def _run_parallel(
     tasks: list, yolo_model: str, n_workers: int,
     save_images: bool = True, show_progress_lines: bool = True,
-    pin_cpu: bool = False,
+    pin_cpu: bool = False, fill_cores: bool = False,
 ) -> tuple:
     """
     v11 — divide a lista de imagens em lotes e distribui entre N processos.
@@ -328,6 +363,10 @@ def _run_parallel(
       de processos de OCR) — Lei de Amdahl limitando o speedup TOTAL a bem
       menos do que o speedup do OCR isoladamente, por mais que esse
       escalasse bem. Paralelizar as duas etapas juntas remove esse piso.
+
+    fill_cores: ver docstring de run_tasks. Repassado direto para
+    _ort_threads_per_worker — não afeta nada além do nº de threads ORT
+    internas por worker.
 
     Retorna (all_results, yolo_time_sum, ocr_time_sum, wall). Os dois
     valores de tempo de estágio são SOMAS acumuladas do tempo gasto em cada
@@ -362,7 +401,7 @@ def _run_parallel(
     chunks      = _chunk_list(tasks, n_workers)
     barrier     = ctx.Barrier(n_workers + 1)   # +1 = processo pai (ver _warmup_pool)
     yolo_batch  = _effective_yolo_batch_size(n_workers)
-    ort_threads = _ort_threads_per_worker(n_workers)
+    ort_threads = _ort_threads_per_worker(n_workers, fill_cores)
 
     affinity_list, worker_index_counter = None, None
     if pin_cpu:
@@ -387,13 +426,14 @@ def _run_parallel(
             else "  ·  CPU pinning: desligado" if pin_cpu
             else ""
         )
+        thread_mode_note = "adaptativo (fill-cores)" if fill_cores else "fixo"
         print(paint(
             f"  [Pipeline paralelo] {n_workers} processo(s) prontos em "
             f"{warmup_s:.2f}s (spawn + import + YOLO/OCR — fora do tempo medido)"
             f"  ·  lote YOLO/processo: {yolo_batch}"
             + (f" (reduzido de {YOLO_BATCH_SIZE} p/ limitar pico de memória)"
                if yolo_batch < YOLO_BATCH_SIZE else "")
-            + f"  ·  ORT threads/processo: {ort_threads}"
+            + f"  ·  ORT threads/processo: {ort_threads} ({thread_mode_note})"
             + affinity_note,
             C.GRAY
         ))
@@ -581,28 +621,39 @@ def _compute_cpu_affinity(n_workers: int) -> list | None:
     return list(range(n_workers))
 
 
-def _ort_threads_per_worker(n_workers: int) -> int:
+def _ort_threads_per_worker(n_workers: int, fill_cores: bool = False) -> int:
     """
     Threads ORT intra-op por processo worker.
 
-    Fórmula: max(1, physical_cores // n_workers)
+    fill_cores=False (PADRÃO):
+      Retorna sempre config.ORT_THREADS_PER_WORKER (1), não importa
+      n_workers. 1 worker = 1 thread ativa, N workers = N threads ativas.
+      Isso é o que torna o paralelismo entre PROCESSOS visível e medível
+      de forma limpa — task manager mostra exatamente N threads em uso
+      com N workers, e o speedup (tempo_serial / tempo_parallel) reflete
+      diretamente o nº de processos, sem outra fonte de paralelismo
+      interferindo. Use este modo para benchmark/relatório acadêmico.
 
-    Com poucos workers, cada um recebe mais threads ORT para preencher os
-    núcleos que ficariam ociosos com o esquema "1 thread por processo":
-      2 workers em 6 físicos → 3 threads cada  (6 núcleos ativos)
-      4 workers em 6 físicos → 1 thread cada   (4 núcleos ativos)
-      6 workers em 6 físicos → 1 thread cada   (6 núcleos ativos)
-      8+ workers             → 1 thread cada   (sem oversubscription)
-
-    Por que não simplesmente "1 thread sempre"?
-    Com 2 workers × 1 thread ORT = apenas 2 dos 6 núcleos físicos ativos.
-    O serial usa mais threads ORT por padrão (ORT ignora OMP_NUM_THREADS em
-    versões recentes) e por isso roda a ~42 ms/img YOLO, enquanto o worker
-    paralelo com 1 thread roda a ~60 ms/img — o worker é mais lento POR
-    IMAGEM que o serial, ganhando apenas por haver 2 rodando ao mesmo tempo.
-    Dar 3 threads a cada worker com n_workers=2 usa todos os 6 físicos e
-    reduz a latência por inferência de ~60 ms → ~35 ms: speedup real ~3×.
+    fill_cores=True (modo adaptativo, opt-in):
+      Fórmula: max(1, physical_cores // n_workers)
+      Com poucos workers, cada um recebe mais threads ORT para preencher
+      os núcleos que ficariam ociosos com o esquema "1 thread por
+      processo":
+        2 workers em 6 físicos → 3 threads cada  (6 núcleos ativos)
+        4 workers em 6 físicos → 1 thread cada   (4 núcleos ativos)
+        6 workers em 6 físicos → 1 thread cada   (6 núcleos ativos)
+        8+ workers             → 1 thread cada   (sem oversubscription)
+      Maximiza throughput bruto (imagens/s), mas mistura paralelismo
+      intra-operação com paralelismo entre processos — o nº total de
+      threads ativas no sistema pode ficar quase constante entre 1 e 2
+      workers (3 threads × 2 workers = 6, igual a 1 worker × 6 threads),
+      fazendo o speedup entre essas duas configurações parecer ~1x. Não
+      é apropriado para demonstrar/medir speedup por Nº DE PROCESSOS —
+      só para comparar throughput bruto como experimento separado.
     """
+    if not fill_cores:
+        return ORT_THREADS_PER_WORKER
+
     try:
         import psutil
         physical = psutil.cpu_count(logical=False) or 1
