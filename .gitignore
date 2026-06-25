@@ -3,7 +3,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
 build/
 develop-eggs/
 dist/
@@ -29,17 +28,6 @@ ENV/
 env.bak/
 venv.bak/
 .python-version
-
-# ── Testes e cobertura ────────────────────────────────────────────────────────
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-coverage.xml
-*.cover
-.hypothesis/
 
 # ── IDEs e editores ───────────────────────────────────────────────────────────
 .vscode/
@@ -67,10 +55,14 @@ desktop.ini
 *.tmp
 *.bak
 *.swp
+*.data
+*_temp.onnx
+
+# ── Gráficos gerados localmente ───────────────────────────────────────────────
+# Regenere com os tempos do seu hardware antes de apresentar.
+graficos/
 
 # ── Outputs gerados em runtime ────────────────────────────────────────────────
-# CSVs, relatórios e imagens processadas são regenerados a cada execução.
-# Apenas os .gitkeep permanecem para manter a estrutura de pastas.
 data/output/*.csv
 data/output/*.html
 data/output/crops/*
@@ -79,16 +71,9 @@ data/output/preprocessed/*
 !data/output/preprocessed/.gitkeep
 
 # ── Lista de placas roubadas (gerenciada localmente) ──────────────────────────
-# Cada usuário/máquina pode ter sua própria lista de testes.
-# Use `python tools/stolen.py` para gerenciar.
 data/stolen_plates.txt
 
-# ── O que FICA versionado (lembrete) ──────────────────────────────────────────
-# - Todo código em src/, tools/, main.py
-# - requirements.txt, README.md
-# - models/license_plate_detector.pt  (modelo YOLO, ~6MB)
-# - data/input/*.jpg                  (suas imagens de teste)
-# Ignora conteúdo mas mantém estrutura de pastas
+# ── Dataset de imagens ────────────────────────────────────────────────────────
 data/input/*
 !data/input/.gitkeep
 
@@ -101,5 +86,9 @@ data/output/crops/*
 data/output/preprocessed/*
 !data/output/preprocessed/.gitkeep
 
-models/*
+# ── Modelos quantizados gerados localmente ────────────────────────────────────
+# O modelo base (.pt e .onnx) fica versionado.
+# Modelos gerados por tools/quantize*.py ficam apenas localmente.
+models/*_int8.onnx
+models/*_static_int8.onnx
 !models/.gitkeep
