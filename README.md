@@ -156,12 +156,7 @@ Speedup(p)    = T(1) / T(p)
 Eficiência(p) = Speedup(p) / p
 ```
 
-Onde `T(1)` é o tempo serial e `T(p)` é o tempo com `p` processos. Duas métricas de speedup são calculadas:
-
-| Métrica | Base de cálculo | Significado |
-|---|---|---|
-| **Spd(int)** | Tempo total interno (extraído do stdout do `main.py`) | Speedup computacional puro — exclui overhead de spawn. Métrica correta para avaliar o paralelismo. |
-| **Spd(wall)** | Tempo real de parede | Inclui spawn e toda latência percebida pelo usuário final. |
+Onde `T(1)` é o tempo serial e `T(p)` é o tempo com `p` processos. O tempo usado em todas as tabelas deste relatório é o **tempo interno** (extraído do stdout do `main.py`), que exclui overhead de spawn dos processos — é a métrica correta para avaliar o paralelismo computacional puro do pipeline.
 
 ### 4.3 Configurações testadas
 
@@ -188,36 +183,36 @@ Todas as configurações, em cada execução, processaram o mesmo conjunto de im
 
 ### 5.1 Execução 1 — 1.500 imagens (timeout = 360 s)
 
-| Processos | Wall (s) | Interno (s) | Spd(int) | Spd(wall) | Eficiência | Throughput interno (img/s) |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1 (serial) | 96.587 | 89.866 | 1.000x | 1.000x | 100,0% | 16,69 |
-| 2 | 58.979 | 48.375 | 1.858x | 1.638x | 92,9% | 31,01 |
-| 4 | 36.935 | 26.005 | 3.456x | 2.615x | 86,4% | 57,68 |
-| **8** | **33.819** | **20.483** | **4.387x** | **2.856x** | **54,8%** | **73,23** |
-| 12 | 39.438 | 23.286 | 3.859x | 2.449x | 32,2% | 64,42 |
+| Processos | Tempo (s) | Speedup | Eficiência |
+|---:|---:|---:|---:|
+| 1 (serial) | 89.866 | 1.000x | 100,0% |
+| 2 | 48.375 | 1.858x | 92,9% |
+| 4 | 26.005 | 3.456x | 86,4% |
+| **8** | **20.483** | **4.387x** | **54,8%** |
+| 12 | 23.286 | 3.859x | 32,2% |
 
-🏆 **Melhor configuração: `parallel/8w`** — speedup interno de **4,387×**, throughput de **73,23 img/s** (4,4× o throughput serial).
+🏆 **Melhor configuração: `parallel/8w`** — speedup de **4,387×**, reduzindo o tempo de 89,87 s para 20,48 s.
 
 ### 5.2 Execução 2 — 3.000 imagens (timeout = 400 s)
 
-| Processos | Wall (s) | Interno (s) | Spd(int) | Spd(wall) | Eficiência | Throughput interno (img/s) |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1 (serial) | 209.980 | 202.719 | 1.000x | 1.000x | 100,0% | 14,80 |
-| 2 | 101.450 | 90.526 | 2.239x | 2.070x | **112,0%** ⚡ | 33,14 |
-| 4 | 63.385 | 52.261 | 3.879x | 3.313x | 97,0% | 57,40 |
-| **8** | **52.054** | **38.593** | **5.253x** | **4.034x** | **65,7%** | **77,73** |
-| 12 | 59.732 | 43.401 | 4.671x | 3.515x | 38,9% | 69,12 |
+| Processos | Tempo (s) | Speedup | Eficiência |
+|---:|---:|---:|---:|
+| 1 (serial) | 202.719 | 1.000x | 100,0% |
+| 2 | 90.526 | 2.239x | **112,0%** ⚡ |
+| 4 | 52.261 | 3.879x | 97,0% |
+| **8** | **38.593** | **5.253x** | **65,7%** |
+| 12 | 43.401 | 4.671x | 38,9% |
 
-🏆 **Melhor configuração: `parallel/8w`** — speedup interno de **5,253×**, throughput de **77,73 img/s** (5,3× o throughput serial). Esta é a **melhor marca registrada em todo o experimento**.
+🏆 **Melhor configuração: `parallel/8w`** — speedup de **5,253×**, reduzindo o tempo de 202,72 s para 38,59 s. Esta é a **melhor marca registrada em todo o experimento**.
 
 ⚡ Em **2 workers**, a eficiência ultrapassou 100% (**speedup superlinear**) — ponto discutido em detalhe na §6.1.
 
 ### 5.3 Resumo consolidado — melhores resultados por execução
 
-| Execução | Imagens | Melhor config | Spd(int) | Spd(wall) | Eficiência | Throughput |
-|---|---:|---|---:|---:|---:|---:|
-| Execução 1 | 1.500 | parallel/8w | 4,387x | 2,856x | 54,8% | 73,23 img/s |
-| **Execução 2** | **3.000** | **parallel/8w** | **5,253x** | **4,034x** | **65,7%** | **77,73 img/s** |
+| Execução | Imagens | Melhor config | Speedup | Eficiência |
+|---|---:|---|---:|---:|
+| Execução 1 | 1.500 | parallel/8w | 4,387x | 54,8% |
+| **Execução 2** | **3.000** | **parallel/8w** | **5,253x** | **65,7%** |
 
 > A Execução 2, com um lote de imagens duas vezes maior, amortiza melhor o overhead fixo de cada processo (spawn, import de bibliotecas, warm-up residual fora do cronômetro, mas ainda presente na variância) e atinge tanto speedup interno quanto eficiência superiores — evidência consistente de que workloads maiores favorecem o paralelismo neste hardware.
 
@@ -249,7 +244,7 @@ Em 12 workers (= total de threads lógicas da máquina), o tempo total **piora**
 
 ### 6.5 Por que a Execução 2 supera a Execução 1 em todas as métricas de paralelismo
 
-Com o dobro de imagens (3.000 vs. 1.500), o custo fixo por processo (parte residual de overhead que escapa ao `Barrier` de warmup, como alocações de memória incrementais e jitter do agendador do SO) é amortizado sobre um volume maior de trabalho útil. Isso explica por que, na mesma configuração de 8 workers, a Execução 2 atinge tanto speedup interno maior (5,253× vs. 4,387×) quanto speedup de wall clock proporcionalmente maior (4,034× vs. 2,856×) — o ganho percentual de wall clock sobre o tempo interno é o indicador mais sensível ao tamanho do lote, já que overheads de spawn/import (constantes, independentes do volume de imagens) pesam relativamente menos quanto maior o lote.
+Com o dobro de imagens (3.000 vs. 1.500), o custo fixo por processo (parte residual de overhead que escapa ao `Barrier` de warmup, como alocações de memória incrementais e jitter do agendador do SO) é amortizado sobre um volume maior de trabalho útil. Isso explica por que, na mesma configuração de 8 workers, a Execução 2 atinge speedup maior (5,253× vs. 4,387×) e eficiência maior (65,7% vs. 54,8%) — overheads fixos por processo (constantes, independentes do volume de imagens) pesam relativamente menos quanto maior o lote.
 
 ### 6.6 Fatores limitantes identificados
 
@@ -399,7 +394,7 @@ Os experimentos confirmam, na prática, os princípios teóricos de paralelismo 
 - **Otimização de dados (INT8) pode superar o paralelismo bruto**: reduzir o modelo de ~11,8 MB para ~3,4 MB permitiu que mais cópias do modelo coexistissem no cache L3, sendo responsável pelo speedup superlinear observado em 2 workers.
 - **O tamanho do workload importa**: a mesma configuração (8 workers) rendeu speedup interno de 4,387× com 1.500 imagens e 5,253× com 3.000 imagens — overheads fixos por processo se diluem melhor em lotes maiores.
 
-A configuração recomendada para esta máquina, equilibrando tempo absoluto e eficiência de recursos, é **`parallel` com 8 workers e modelo YOLO INT8 estático**, que produziu o melhor tempo absoluto em ambas as baterias de teste (33,82 s e 52,05 s de wall clock, respectivamente).
+A configuração recomendada para esta máquina, equilibrando tempo absoluto e eficiência de recursos, é **`parallel` com 8 workers e modelo YOLO INT8 estático**, que produziu o melhor tempo absoluto em ambas as baterias de teste (20,48 s e 38,59 s, respectivamente).
 
 ---
 
