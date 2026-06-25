@@ -396,6 +396,13 @@ Os experimentos confirmam, na prática, os princípios teóricos de paralelismo 
 
 A configuração recomendada para esta máquina, equilibrando tempo absoluto e eficiência de recursos, é **`parallel` com 8 workers e modelo YOLO INT8 estático**, que produziu o melhor tempo absoluto em ambas as baterias de teste (20,48 s e 38,59 s, respectivamente).
 
+### Trabalho futuro
+
+- Coletar a quebra de tempo por estágio (YOLO vs. OCR) por configuração, para confirmar quantitativamente o comportamento descrito em §2.1 e §6.
+- Repetir os testes com `--repeat 3` para obter desvio padrão e intervalos de confiança sobre o speedup medido.
+- Testar `--pin-cpu` para verificar se a fixação explícita de processos a núcleos físicos reduz a degradação observada em 12 workers.
+- Gerar e comparar a bateria completa também com o modelo FP32, para quantificar isoladamente o ganho atribuível à quantização INT8 (item ainda pendente nas tabelas de §5).
+
 ---
 
 Projeto desenvolvido para a disciplina de **Programação Concorrente e Distribuída**.
