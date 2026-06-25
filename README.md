@@ -220,6 +220,34 @@ Todas as configurações, em cada execução, processaram o mesmo conjunto de im
 
 > Os logs do `run_blackbox.py` capturados (`resultados1.txt`) reportam apenas os tempos agregados de wall clock e tempo interno total por configuração. A quebra por estágio (YOLO acumulado vs. OCR acumulado) exige a execução de `main.py` em modo verboso/benchmark individual por configuração, não incluída nesta coleta. Essa medição fica como trabalho futuro indicado na §9.
 
+### 5.5 Gráficos
+
+<!--
+  Salve as imagens em uma pasta (ex.: docs/img/) e ajuste os caminhos abaixo.
+  Sugestão de nomes de arquivo, já alinhados com os dados das §5.1 e §5.2:
+    - docs/img/speedup_workers.png
+    - docs/img/eficiencia_workers.png
+    - docs/img/tempo_workers.png
+-->
+
+**Speedup vs. número de processos**
+
+![Speedup vs. número de processos](docs/img/speedup_workers.png)
+
+> Compara o speedup obtido em cada configuração (2, 4, 8, 12 processos) nas duas execuções (1.500 e 3.000 imagens), frente à linha de speedup ideal (linear).
+
+**Eficiência vs. número de processos**
+
+![Eficiência vs. número de processos](docs/img/eficiencia_workers.png)
+
+> Mostra a queda de eficiência a partir de 8 processos, evidenciando a saturação das threads lógicas discutida na §6.4.
+
+**Tempo de execução vs. número de processos**
+
+![Tempo de execução vs. número de processos](docs/img/tempo_workers.png)
+
+> Tempo interno (s) por configuração, em escala logarítmica, comparando as duas execuções lado a lado.
+
 ---
 
 ## 6. Análise dos Resultados
@@ -395,13 +423,6 @@ Os experimentos confirmam, na prática, os princípios teóricos de paralelismo 
 - **O tamanho do workload importa**: a mesma configuração (8 workers) rendeu speedup interno de 4,387× com 1.500 imagens e 5,253× com 3.000 imagens — overheads fixos por processo se diluem melhor em lotes maiores.
 
 A configuração recomendada para esta máquina, equilibrando tempo absoluto e eficiência de recursos, é **`parallel` com 8 workers e modelo YOLO INT8 estático**, que produziu o melhor tempo absoluto em ambas as baterias de teste (20,48 s e 38,59 s, respectivamente).
-
-### Trabalho futuro
-
-- Coletar a quebra de tempo por estágio (YOLO vs. OCR) por configuração, para confirmar quantitativamente o comportamento descrito em §2.1 e §6.
-- Repetir os testes com `--repeat 3` para obter desvio padrão e intervalos de confiança sobre o speedup medido.
-- Testar `--pin-cpu` para verificar se a fixação explícita de processos a núcleos físicos reduz a degradação observada em 12 workers.
-- Gerar e comparar a bateria completa também com o modelo FP32, para quantificar isoladamente o ganho atribuível à quantização INT8 (item ainda pendente nas tabelas de §5).
 
 ---
 
