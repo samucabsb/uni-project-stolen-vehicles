@@ -10,7 +10,7 @@ from pathlib import Path
 
 # ── Versão ────────────────────────────────────────────────────────────────────
 
-VERSION = "11.2"
+VERSION = "11.3"
 
 
 # ── Diretórios principais ─────────────────────────────────────────────────────
@@ -60,17 +60,15 @@ YOLO_BATCH_SIZE = 32
 # Teto do nº de imagens decodificadas em memória SIMULTANEAMENTE somando
 # TODOS os processos do pool (ver YOLO_BATCH_SIZE acima).
 #
-# v11.2 — elevado de 64 para 96: medições reais (ver performance_log) numa
-# máquina de 6 físicos/12 lógicos com 7-8 GB livres mostraram RSS bem
-# abaixo do limite de segurança mesmo em 12 processos simultâneos, e o
-# lote por processo ficava pequeno demais em alta contagem de workers
-# (8 workers → lote 8 ; 12 workers → lote 5), amortizando mal o overhead
-# fixo por chamada Python/ONNX — parte da degradação observada em 8 e 12
-# workers vem daí, não só de contenção de CPU. Com 96: 8 workers → lote 12,
-# 12 workers → lote 8. Se RAM disponível for menor que ~6 GB no ambiente de
-# destino, volte para 64 (ou menos) — ajuste para baixo se vir processos
-# sendo encerrados (erros em massa, queda do terminal) com muitos workers.
-MAX_TOTAL_INFLIGHT_IMAGES = 96
+# v11.3 — elevado de 96 para 384: com o modelo INT8 (~3 MB), a pressão de
+# memória por imagem é o fator limitante, não o modelo em si. Lotes maiores
+# amortizam o overhead fixo de chamada Python/ONNX (estimado em ~5ms/call):
+#   batch=12 → 0.42 ms/img de overhead de chamada
+#   batch=32 → 0.16 ms/img
+# Com 12 workers × batch=32: 384 imagens decodificadas simultaneamente.
+# Estimativa de RAM: 384 × ~1 MB/img BGR = ~380 MB — seguro com 4+ GB livres.
+# Se RAM disponível for menor que 3 GB, use MAX_TOTAL_INFLIGHT_IMAGES = 128.
+MAX_TOTAL_INFLIGHT_IMAGES = 384
 
 
 # ── Paralelismo / particionamento de tarefas ──────────────────────────────────
@@ -144,6 +142,26 @@ ORT_THREADS_PER_WORKER = 1
 # Para pipelines onde o YOLO é o gargalo dominante (este projeto), a diferença
 # de velocidade entre s e xs é negligenciável. Prefira s para melhor precisão.
 FAST_OCR_MODEL = "cct-s-v2-global-model"
+
+# Caminho para modelo OCR INT8 quantizado (None = usa o modelo padrão acima).
+# Gerado por: python -c "from onnxruntime.quantization import quantize_dynamic..."
+# Veja run_blackbox.py --ocr-model para ativar via linha de comando.
+# Prefere xs-INT8 (1.06MB) > s-INT8 (1.7MB) > fallback para o modelo online.
+# xs é mais rápido E menor → menos pressão de cache L3 em paralelo.
+_OCR_XS_INT8  = MODELS_DIR / "cct_xs_v2_global_int8.onnx"
+_OCR_XS_CFG   = Path.home() / ".cache/fast-plate-ocr/cct-xs-v2-global-model/cct_xs_v2_global_plate_config.yaml"
+_OCR_S_INT8   = MODELS_DIR / "cct_s_v2_global_int8.onnx"
+_OCR_S_CFG    = Path.home() / ".cache/fast-plate-ocr/cct-s-v2-global-model/cct_s_v2_global_plate_config.yaml"
+
+if _OCR_XS_INT8.exists() and _OCR_XS_CFG.exists():
+    FAST_OCR_MODEL_PATH  = _OCR_XS_INT8
+    FAST_OCR_CONFIG_PATH = _OCR_XS_CFG
+elif _OCR_S_INT8.exists() and _OCR_S_CFG.exists():
+    FAST_OCR_MODEL_PATH  = _OCR_S_INT8
+    FAST_OCR_CONFIG_PATH = _OCR_S_CFG
+else:
+    FAST_OCR_MODEL_PATH  = None
+    FAST_OCR_CONFIG_PATH = None
 
 # Comprimento mínimo de placa aceito (caracteres alfanuméricos).
 # Leituras com menos caracteres são descartadas como leituras parciais.

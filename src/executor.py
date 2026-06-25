@@ -336,6 +336,11 @@ def run_tasks(
             tasks, yolo_model, workers_eff, save_images, show_progress_lines,
             pin_cpu, fill_cores,
         )
+    elif execution == "thread":
+        workers_eff = workers
+        results, yolo_time, ocr_time, elapsed = _run_thread_parallel(
+            tasks, yolo_model, workers_eff, save_images, show_progress_lines,
+        )
     else:
         raise ValueError(f"Modo desconhecido: {execution!r}")
 
@@ -567,6 +572,184 @@ def _read_cpu_freq_mhz() -> float | None:
         return freq.current if freq else None
     except Exception:
         return None
+
+
+def _run_thread_parallel(
+    tasks: list, yolo_model: str, n_threads: int,
+    save_images: bool = True, show_progress_lines: bool = True,
+) -> tuple:
+    """
+    Modo thread — YOLO + OCR compartilhados por N threads no mesmo processo.
+
+    Diferença crucial vs. ProcessPoolExecutor (modo parallel):
+      Processos : N processos × 3.4 MB YOLO = N × 3.4 MB no L3.
+      Threads   : 1 SharedYOLO × 3.4 MB = 3.4 MB total no L3 (compartilhado).
+
+    ORT garante thread-safety de InferenceSession.run(): múltiplas threads
+    podem chamar session.run() simultaneamente — o modelo fica em cache como
+    UMA cópia, lida concorrentemente, sem cópias extras por thread.
+
+    GIL: liberado durante session.run() (código C++) e cv2.imread/resize
+    (C++) — as threads correm em paralelo real durante >90% do tempo.
+    """
+    import cv2 as _cv2
+    import concurrent.futures
+    import threading
+
+    from src.config import (
+        CROPS_DIR, PREPROCESSED_DIR, WORD_BLACKLIST,
+        STATUS_OK, STATUS_STOLEN, BBOX_PADDING_RATIO,
+        YOLO_BATCH_SIZE,
+    )
+    from src.detector import _expand_bbox
+    from src.ocr import make_ocr_engine, warmup_ocr, read_plate_text, preprocess_plate
+    from src.pipeline import _new_result, init_runtime, _patch_onnxruntime_threads
+    from src.yolo_infer import SharedYOLO
+
+    init_runtime()
+    _patch_onnxruntime_threads(1)
+
+    # Carrega modelos UMA VEZ — compartilhados entre todas as threads
+    print(paint(
+        f"  [Thread parallel] {len(tasks)} imagens em {n_threads} threads"
+        f" · YOLO + OCR compartilhados (1 sessão cada)\n",
+        C.CYAN
+    ))
+    shared_yolo = SharedYOLO(yolo_model)
+    warmup_ocr()
+    shared_ocr  = make_ocr_engine()
+
+    stolen_plates = tasks[0]["stolen_plates"] if tasks else set()
+    CROPS_DIR.mkdir(parents=True, exist_ok=True)
+    PREPROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
+    all_results    = [None] * len(tasks)
+    yolo_time_lock = threading.Lock()
+    yolo_total     = [0.0]
+    ocr_total      = [0.0]
+
+    # Divide em lotes de YOLO_BATCH_SIZE imagens por chamada de inferência
+    batch_size = max(1, YOLO_BATCH_SIZE)
+
+    def process_chunk(chunk_with_offset: tuple) -> None:
+        chunk, base_offset = chunk_with_offset
+        mini_batches = [
+            chunk[s: s + batch_size]
+            for s in range(0, len(chunk), batch_size)
+        ]
+
+        yolo_acc = 0.0
+        ocr_acc  = 0.0
+
+        for batch in mini_batches:
+            paths  = [t["image_path"] for t in batch]
+            images = [_cv2.imread(p) for p in paths]
+
+            t_yolo = time.perf_counter()
+            try:
+                dets_list = shared_yolo.infer_batch(
+                    [img for img in images if img is not None]
+                )
+            except Exception:
+                dets_list = [[] for img in images if img is not None]
+            yolo_elapsed = time.perf_counter() - t_yolo
+            yolo_per_img = yolo_elapsed / len(batch) if batch else 0.0
+            yolo_acc += yolo_elapsed
+
+            det_iter = iter(dets_list)
+            for local_i, (task, img) in enumerate(zip(batch, images)):
+                result = _new_result(task["image_path"].split("\\")[-1].split("/")[-1])
+                result["yolo_time_s"] = round(yolo_per_img, 6)
+
+                if img is None:
+                    result["error"]        = "Nao foi possivel carregar."
+                    result["total_time_s"] = result["yolo_time_s"]
+                    all_results[base_offset + local_i] = result
+                    continue
+
+                img_dets = next(det_iter, [])
+                if not img_dets:
+                    result["total_time_s"] = result["yolo_time_s"]
+                    all_results[base_offset + local_i] = result
+                    continue
+
+                best = max(img_dets, key=lambda d: d["conf"])
+                x1, y1, x2, y2 = map(int, best["xyxy"])
+                h_img, w_img = img.shape[:2]
+                x1, y1, x2, y2 = _expand_bbox(x1, y1, x2, y2, w_img, h_img, BBOX_PADDING_RATIO)
+                x1  = max(0, x1); y1 = max(0, y1)
+                x2  = min(w_img, x2); y2 = min(h_img, y2)
+                crop = img[y1:y2, x1:x2]
+
+                if crop.size == 0:
+                    result["total_time_s"] = result["yolo_time_s"]
+                    all_results[base_offset + local_i] = result
+                    continue
+
+                result["plate_detected"] = True
+
+                if save_images:
+                    from pathlib import Path as _P
+                    stem = _P(task["image_path"]).stem
+                    _cv2.imwrite(str(CROPS_DIR / f"{stem}_crop.jpg"), crop)
+                    prep = preprocess_plate(crop)
+                    _cv2.imwrite(str(PREPROCESSED_DIR / f"{stem}_prep.jpg"), prep)
+
+                t_ocr = time.perf_counter()
+                try:
+                    plate_text, confidence = read_plate_text(
+                        shared_ocr, crop, None, WORD_BLACKLIST
+                    )
+                except Exception as exc:
+                    result["error"]        = f"OCR: {exc}"
+                    result["total_time_s"] = result["yolo_time_s"]
+                    all_results[base_offset + local_i] = result
+                    ocr_acc += time.perf_counter() - t_ocr
+                    continue
+
+                ocr_elapsed = time.perf_counter() - t_ocr
+                ocr_acc += ocr_elapsed
+
+                result["ocr_time_s"]     = round(ocr_elapsed, 6)
+                result["plate_text"]     = plate_text
+                result["ocr_confidence"] = round(confidence, 4)
+                if plate_text:
+                    result["status"] = (
+                        STATUS_STOLEN if plate_text in stolen_plates else STATUS_OK
+                    )
+                result["total_time_s"] = round(
+                    result["yolo_time_s"] + ocr_elapsed, 6
+                )
+                all_results[base_offset + local_i] = result
+
+        with yolo_time_lock:
+            yolo_total[0] += yolo_acc
+            ocr_total[0]  += ocr_acc
+
+    # Divide tarefas em chunks iguais, um por thread
+    chunk_size = max(1, (len(tasks) + n_threads - 1) // n_threads)
+    chunks_with_offsets = [
+        (tasks[s: s + chunk_size], s)
+        for s in range(0, len(tasks), chunk_size)
+    ]
+
+    t_start = time.perf_counter()
+    bar = _ProgressBar(len(tasks), label="Threads")
+    bar.start()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as pool:
+        futs = [pool.submit(process_chunk, cwo) for cwo in chunks_with_offsets]
+        concurrent.futures.wait(futs)
+
+    bar.finish()
+    elapsed = time.perf_counter() - t_start
+
+    # Preenche lacunas (chunks que falharam silenciosamente)
+    for i, r in enumerate(all_results):
+        if r is None:
+            all_results[i] = _error_result(tasks[i], "thread chunk falhou")
+
+    return all_results, yolo_total[0], ocr_total[0], elapsed
 
 
 def _compute_cpu_affinity(n_workers: int) -> list | None:

@@ -39,6 +39,7 @@ import numpy as np
 from src.config import (
     FAST_OCR_MODEL, WORD_BLACKLIST,
     OCR_MIN_PLATE_LEN, OCR_MIN_CONFIDENCE,
+    FAST_OCR_MODEL_PATH, FAST_OCR_CONFIG_PATH,
 )
 from src.logger import get_logger
 
@@ -61,7 +62,13 @@ def _get_recognizer():
         with _recognizer_lock:
             if _recognizer is None:
                 from fast_plate_ocr import LicensePlateRecognizer
-                _recognizer = LicensePlateRecognizer(FAST_OCR_MODEL)
+                if FAST_OCR_MODEL_PATH and FAST_OCR_MODEL_PATH.exists():
+                    _recognizer = LicensePlateRecognizer(
+                        onnx_model_path=str(FAST_OCR_MODEL_PATH),
+                        plate_config_path=str(FAST_OCR_CONFIG_PATH) if FAST_OCR_CONFIG_PATH else None,
+                    )
+                else:
+                    _recognizer = LicensePlateRecognizer(FAST_OCR_MODEL)
     return _recognizer
 
 

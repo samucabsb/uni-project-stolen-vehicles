@@ -210,26 +210,27 @@ def process_image_serial(task: dict) -> dict:
 
 def _patch_onnxruntime_threads(n_threads: int = 1) -> None:
     """
-    Monkeypatch local ao processo: força toda futura `ort.InferenceSession`
-    criada SEM sess_options explícitas a usar exatamente `n_threads` threads
-    internas de intra-op (paralelismo dentro de cada operação ONNX).
+    Monkeypatch local ao processo: força TODA `ort.InferenceSession` criada
+    neste processo a usar exatamente `n_threads` threads intra-op, independente
+    de quem cria a sessão ou se passa sess_options explícitas.
 
-    Por quê: a classe pública `ultralytics.YOLO` não expõe nenhum jeito de
-    passar SessionOptions para a sessão ONNX que ela cria internamente —
-    `ultralytics/nn/autobackend.py` chama
-    `onnxruntime.InferenceSession(w, providers=providers)` sem sess_options,
-    então o YOLO sempre cai no padrão intra_op_num_threads=0 ("auto" → usa
-    todos os núcleos). Sem este patch, rodar N processos cada um com seu
-    próprio YOLO recriaria o bug de oversubscription.
+    Por quê aplicar mesmo quando sess_options é passado:
+      Bibliotecas como fast-plate-ocr podem criar SessionOptions internamente
+      com intra_op_num_threads=0 (auto → todos os núcleos) e passá-las para
+      InferenceSession. O patch antigo ignorava esse caso (só aplicava quando
+      sess_options era None) — resultado: sessão OCR com N threads, spin-wait
+      de N threads ociosas visível no gerenciador de tarefas como "todos os
+      núcleos em uso" mesmo com apenas 1 worker ativo.
 
-    n_threads é calculado adaptativamente em executor._ort_threads_per_worker:
-      max(1, physical_cores // n_workers)
-    → com 2 workers em 6 físicos: 3 threads cada (6 núcleos ativos)
-    → com 4+ workers: 1 thread cada (sem oversubscription)
+    allow_spinning=0:
+      ORT usa busy-wait (spin) por padrão nas threads do pool para minimizar
+      latência. Mesmo com intra_op_num_threads=1, o pool global pode ter N
+      threads criadas; N-1 ficam em spin esperando trabalho e aparecem como
+      100% de CPU no gerenciador de tarefas. Desativar spinning faz threads
+      ociosas dormirem (bloqueio real de SO), eliminando o consumo falso.
 
-    O patch só altera o atributo `InferenceSession` no módulo `onnxruntime`
-    DESTE processo (cada processo filho importa sua própria cópia do módulo)
-    — não tem efeito no processo principal nem no modo serial.
+    O patch altera ort.InferenceSession NESTE processo (módulo isolado por
+    processo via spawn). Não tem efeito em outros processos.
     """
     import onnxruntime as ort
 
@@ -242,9 +243,24 @@ def _patch_onnxruntime_threads(n_threads: int = 1) -> None:
         def __init__(self, path_or_bytes, sess_options=None, **kwargs):
             if sess_options is None:
                 sess_options = ort.SessionOptions()
-                sess_options.intra_op_num_threads = n_threads
-                sess_options.inter_op_num_threads = 1
                 sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            # Aplica o limite de threads SEMPRE — inclusive quando sess_options
+            # vem de uma biblioteca externa com intra_op_num_threads=0 (auto).
+            sess_options.intra_op_num_threads = n_threads
+            sess_options.inter_op_num_threads = 1
+            try:
+                # Desativa busy-wait das threads ORT ociosas. Sem isso, N-1
+                # threads do pool global ficam em spin mesmo sem inferência
+                # ativa, consumindo CPU e poluindo a leitura do gerenciador
+                # de tarefas ("todos os núcleos em uso" com 1 worker só).
+                sess_options.add_session_config_entry(
+                    "session.intra_op.allow_spinning", "0"
+                )
+                sess_options.add_session_config_entry(
+                    "session.inter_op.allow_spinning", "0"
+                )
+            except Exception:
+                pass
             super().__init__(path_or_bytes, sess_options=sess_options, **kwargs)
 
     _LimitedThreadInferenceSession._ort_thread_patch_n = n_threads

@@ -67,6 +67,22 @@ _THREAD_ENV_VARS = (
     "BLIS_NUM_THREADS",
 )
 
+# Variáveis que controlam o comportamento de espera ativa (spin-wait) das
+# threads OpenMP/MKL quando ociosas. KMP_BLOCKTIME=0 faz as threads Intel OMP
+# dormirem imediatamente após o trabalho (em vez de ficarem em busy-wait por
+# alguns milissegundos esperando mais trabalho). OMP_WAIT_POLICY=passive faz o
+# mesmo para OpenMP genérico. Sem essas variáveis, N-1 threads de cada sessão
+# ORT ficam em spin consumindo CPU e disputando L1/L2/L3 com as threads ativas
+# de outros workers, multiplicando a pressão de cache e causando o padrão de
+# slowdown linear observado: 4 workers = 1.4× mais lento/worker, 8 workers =
+# 2.7× mais lento/worker. Devem ser definidas ANTES de importar qualquer lib.
+_SPIN_ENV_VARS: dict = {
+    "KMP_BLOCKTIME":   "0",        # Intel OMP (iomp5, usada pelo ORT no Windows)
+    "OMP_WAIT_POLICY": "passive",  # OpenMP padrão
+    "GOMP_SPINCOUNT":  "0",        # GCC OpenMP
+    "KMP_SETTINGS":    "0",        # silencia logs do Intel OMP
+}
+
 
 def force_single_thread_env() -> None:
     """
@@ -78,6 +94,9 @@ def force_single_thread_env() -> None:
     """
     for var in _THREAD_ENV_VARS:
         os.environ[var] = "1"
+
+    for var, val in _SPIN_ENV_VARS.items():
+        os.environ.setdefault(var, val)
 
     # Silencia logs de progresso e versão do Ultralytics
     os.environ["YOLO_VERBOSE"] = "False"

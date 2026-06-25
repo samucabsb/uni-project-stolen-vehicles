@@ -18,7 +18,7 @@ saturado — cada inferência lê os pesos da DRAM (10-50× mais lento que L3) e
 vez do cache. Resultado: YOLO fica 2× mais lento por imagem com 4 workers do
 que com 2 workers, zerando o ganho de paralelismo.
 
-A quantização dinâmica converte os pesos FP32 → INT8 (4× menor). Com o modelo
+A quantização dinâmica converte os pesos FP32 -> INT8 (4× menor). Com o modelo
 em ~5-6 MB por cópia, 4 cópias = ~24 MB. Ainda não cabe inteiramente em 6 MB
 de L3, mas reduz dramaticamente a pressão: mais operadores quentes ficam em
 cache, menos acessos a DRAM. Resultado esperado: YOLO com 4 workers de
@@ -83,8 +83,8 @@ def quantize(model_path: str, output_path: str | None = None) -> str:
     src_mb = src.stat().st_size / (1024 ** 2)
     print(f"[QUANTIZE] Fonte   : {src.name} ({src_mb:.1f} MB FP32)")
     print(f"[QUANTIZE] Destino : {dst.name}")
-    print("           Quantizando pesos FP32 → INT8 (sem calibração)...")
-    print("           Isso pode levar 30-120 s na primeira execução.\n")
+    print("           Quantizando pesos FP32 -> INT8 (sem calibracao)...")
+    print("           Isso pode levar 30-120 s na primeira execucao.\n")
 
     # onnxruntime cria um arquivo intermediário "*-inferred.onnx" no mesmo
     # diretório do modelo. Se o caminho contém caracteres não-ASCII (ex.:
@@ -116,8 +116,8 @@ def quantize(model_path: str, output_path: str | None = None) -> str:
     ratio   = dst_mb / src_mb
     savings = (1 - ratio) * 100
 
-    print(f"[QUANTIZE] Concluído!")
-    print(f"           {src_mb:.1f} MB FP32 → {dst_mb:.1f} MB INT8  ({savings:.0f}% menor)")
+    print(f"[QUANTIZE] Concluido!")
+    print(f"           {src_mb:.1f} MB FP32 -> {dst_mb:.1f} MB INT8  ({savings:.0f}% menor)")
     print(f"\n  Para testar a velocidade:")
     print(f"    python main.py --yolo-model {dst} --execution serial --benchmark")
     print(f"    python main.py --yolo-model {dst} --execution parallel --workers 4 --benchmark")

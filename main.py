@@ -55,7 +55,7 @@ from src.html_report import generate_html_report
 from src.logger    import setup_logger, get_logger
 
 
-VALID_EXECUTIONS = ["serial", "parallel"]
+VALID_EXECUTIONS = ["serial", "parallel", "thread"]
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -218,7 +218,21 @@ def run_warmup(execution: str, yolo_model: str) -> float:
 
     Ambos os modos (serial e parallel) pré-aquecem o OCR aqui.
     Isso elimina a latência de cold-start na primeira imagem real.
+
+    O patch ORT e os limites de biblioteca DEVEM ser aplicados aqui, antes
+    de qualquer carregamento de modelo. Sem isso:
+      • warmup_yolo() cria uma sessão ORT com todos os núcleos (intra_op=0)
+      • warmup_ocr() cria o singleton OCR (persistente) também com N threads
+      • Modo serial: reutiliza o singleton com N threads → baseline rápido falso
+      • Modo parallel: o processo principal mantém N threads ORT em spin-wait
+        durante o benchmark → gerenciador de tarefas mostra "todos os núcleos
+        em uso" mesmo com apenas 1 worker ativo, e o speedup aparece errado
     """
+    from src.pipeline import _patch_onnxruntime_threads
+    from src.runtime import apply_library_thread_limits
+    _patch_onnxruntime_threads(1)   # limita ORT a 1 thread ANTES de criar sessões
+    apply_library_thread_limits()   # limita torch/cv2 no processo principal
+
     print(paint("\n===== WARM-UP =====", C.CYAN_BOLD))
     t0 = time.perf_counter()
 
