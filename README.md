@@ -22,6 +22,10 @@ As imagens utilizadas nos testes não estão armazenadas no repositório para ev
 
 Após baixar, extraia o conteúdo para `data/input/`.
 
+Exemplo de placa gerada sinteticamente para testes do sistema:
+
+![Exemplo - Placa do carro 00001](docs/img/00001_IBR2Z58.jpg)
+
 ---
 
 ## Sumário
