@@ -417,6 +417,9 @@ uni-project-stolen-vehicles/
 
 ---
 
+Exemplo do Relatório gerado via HTML após execuções: 
+![Exemplo - Relatório html](docs/img/html.jpeg)
+
 ## 9. Conclusão
 
 Os experimentos confirmam, na prática, os princípios teóricos de paralelismo discutidos na disciplina:
